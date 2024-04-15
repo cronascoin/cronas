@@ -27,7 +27,7 @@ if you are using a lower version, please upgrade it.
 apt install python-pip
 ```
 ```
-apt udate && apt upgrade -y
+apt update && apt upgrade -y
 ```
 ```
 pip install aiohttp
