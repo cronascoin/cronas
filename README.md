@@ -24,7 +24,7 @@ python3 --version
 ```
 if you are using a lower version, please upgrade it.
 ```
-apt install python-pip
+apt install pip
 ```
 ```
 apt update && apt upgrade -y
