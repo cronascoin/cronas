@@ -2,9 +2,9 @@
 
 ## This is the Cronas Coin full node wallet.
 
-This project is being written from scratch in python to be the best crypto currency out there. Currently we are developing the app.py to load an IRC type main program that will operate the network, network.py and we are developing the rpc.py program to handle rpc commands. The wallet uses two ports 4333 for network protocol and 4334 for RPC protocol.
+This project is being written from scratch in python to be the best crypto currency out there. Currently we are working on the peer to peer part of the program. The wallet uses two ports 4333 for network protocol and 4334 for RPC protocol.
 
-The security model that is being proposed here is for a quantum resistant Master Key that is derived from a 12 word mnemonic. Users either use a randomly created list of words, or supply their own words. This is the heart of the keys for Cronas Coin as all other addresses are derived from the Master Key.
+(In Development) The security model that is being proposed here is for a quantum resistant Master Key that is derived from a 12 word mnemonic. Users either use a randomly created list of words, or supply their own words. This is the heart of the keys for Cronas Coin as all other addresses are derived from the Master Key.
 
 Our proposed system will start with a master key which is a sha3-512 hash of the mnemonic list of words.
 
