@@ -1,26 +1,24 @@
 import asyncio
-from network import AsyncIRCServer  # Adjust the import path as necessary
-from rpc import AsyncRPCServer  # Adjust the import path as necessary
-
-async def start_irc_server():
-    irc_server = AsyncIRCServer("0.0.0.0", 4333)
-    print(f"IRC Server ID: {irc_server.server_id}")
-    await irc_server.start_server()
-
-async def start_rpc_server(irc_server):
-    # Assuming get_connected_peers is now a property or a synchronous method
-    rpc_server = AsyncRPCServer("0.0.0.0", 4334, irc_server.connected_peers)
-    await rpc_server.start()
+from peer import Peer
+from rpc import RPCServer
 
 async def main():
-    irc_server = AsyncIRCServer("0.0.0.0", 4333)
-    print(f"Server ID: {irc_server.server_id}")
+    host = '0.0.0.0'
+    p2p_port = 4333
+    rpc_port = 4334
+    seeds = ['137.184.80.215']  # Example seed IP
 
-    # Start both servers concurrently
+    peer = Peer(host, p2p_port, seeds)
+    rpc_server = RPCServer(peer, host, rpc_port)
+
+    # Load existing peers from file
+    peer.load_peers()
+
     await asyncio.gather(
-        start_irc_server(),
-        start_rpc_server(irc_server),
+        peer.start_p2p_server(),
+        rpc_server.start_rpc_server(),
+        *(peer.connect_to_peer(host, p2p_port) for host in seeds)
     )
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     asyncio.run(main())
