@@ -18,6 +18,27 @@ The reason we add the master key to the child key is that if we just hash them a
 Developers work in their own trees.
 
 ## Installation
+This software requires python 3.7 or higher. To check it:
+```
+python3 --version
+```
+if you are using a lower version, please upgrade it.
+```
+apt install python-pip
+```
+```
+apt udate && apt upgrade -y
+```
+```
+pip install aiohttp
+```
+```
+git clone https://github.com/cronascoin/cronas.git
+```
+```
+cd cronas
+python3 app.py
+```
 
 Currently the project is in development.
 
