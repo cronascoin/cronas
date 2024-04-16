@@ -71,11 +71,6 @@ class Peer:
         await writer.drain()
         logging.info("Sent peer list to a peer.")
 
-    '''Remaining methods: start_p2p_server, 
-    connect_to_peer, send_heartbeat, 
-    listen_for_messages, detect_ip_address, 
-    load_peers, add_peer, rewrite_peers_file'''
-
     async def start_p2p_server(self):
         server = await asyncio.start_server(self.handle_peer_connection, self.host, self.p2p_port)
         logging.info(f"P2P server {self.server_id} listening on {self.host}:{self.p2p_port}")
@@ -105,23 +100,11 @@ class Peer:
                 writer.write(json.dumps(handshake_msg).encode() + b'\n')
                 await writer.drain()
 
-                data = await reader.readline()
-                ack_message = json.loads(data.decode())
-                if ack_message.get("type") == "ack":
-                    logging.info(f"Handshake acknowledged by {host}:{port}")
-                    request_message = {"type": "request_peer_list", "server_id": self.server_id}
-                    writer.write(json.dumps(request_message).encode() + b'\n')
-                    await writer.drain()
-                    logging.info("Requested peer list.")
-                    asyncio.create_task(self.listen_for_messages(reader, writer, (host, port)))
-                    asyncio.create_task(self.send_heartbeat(writer))
-                    break
-                else:
-                    logging.info(f"Unexpected response from {host}:{port}")
-                    break
-                attempt += 1
-                backoff = min(2 ** attempt + random.uniform(0, 1), 60)
-                await asyncio.sleep(backoff)
+                # Corrected call to listen_for_messages without address
+                asyncio.create_task(self.listen_for_messages(reader, writer))
+                # If send_heartbeat is defined to accept writer, keep this line as is
+                asyncio.create_task(self.send_heartbeat(writer))
+                break
         finally:
             if writer:
                 writer.close()
