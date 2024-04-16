@@ -18,6 +18,7 @@ class Peer:
         self.load_peers()
         self.rewrite_peers_file()
         self.hello_seq = 0  # Initialize the hello_seq attribute here
+        self.reconnect_delay = 5  # seconds
             
     async def handle_peer_connection(self, reader, writer):
         addr = writer.get_extra_info('peername')
@@ -261,3 +262,27 @@ class Peer:
         # Add additional message types as necessary
         else:
             logging.info(f"Unhandled message type from {addr}: {message['type']}")
+
+async def connect_to_server(self):
+        while True:
+            try:
+                reader, writer = await asyncio.open_connection(self.server_host, self.server_port)
+                logging.info(f"Connected to server at {self.server_host}:{self.server_port}")
+                
+                # Example: Send a hello message upon connection
+                hello_message = json.dumps({"type": "hello", "payload": "Hello from client"})
+                writer.write(hello_message.encode() + b'\n')
+                await writer.drain()
+                
+                # Listen for messages from the server
+                await self.listen_for_messages(reader)
+                
+            except (ConnectionRefusedError, ConnectionResetError):
+                logging.error(f"Connection failed. Reconnecting in {self.reconnect_delay} seconds...")
+                await asyncio.sleep(self.reconnect_delay)
+            except asyncio.CancelledError:
+                logging.info("Connection task was cancelled. Exiting.")
+                break
+            except Exception as e:
+                logging.error(f"Unexpected error: {e}")
+                break
