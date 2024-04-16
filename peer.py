@@ -78,12 +78,16 @@ class Peer:
                     break
                 message = json.loads(data.decode())
                 logging.info(f"Received message from {addr}: {message}")
-                # Handle heartbeat messages
+                
                 if message.get("type") == "heartbeat":
                     logging.info(f"Heartbeat received from {addr}")
-                    response = {"type": "heartbeat_ack", "payload": "pong"}
+                    # Respond to heartbeat with an acknowledgment
+                    response = {"type": "heartbeat_ack", "payload": "pong", "server_id": self.server_id}
                     writer.write(json.dumps(response).encode() + b'\n')
                     await writer.drain()
+                elif message.get("type") == "heartbeat_ack":
+                    # Handle the heartbeat acknowledgment
+                    logging.info(f"Heartbeat acknowledgment received from {addr}")
                 else:
                     logging.info(f"Unhandled message type from {addr}: {message['type']}")
         except Exception as e:
