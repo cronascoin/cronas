@@ -3,14 +3,17 @@ import json
 import logging
 import os
 import random
+import uuid
 
 logging.basicConfig(level=logging.INFO)
 
 class Peer:
     def __init__(self, host, p2p_port, seeds=None):
+        self.server_id = str(uuid.uuid4())
         self.host = host
         self.p2p_port = p2p_port
         self.peers = set(seeds if seeds else [])
+        self.load_peers()
         self.rewrite_peers_file()
 
     async def handle_peer_connection(self, reader, writer):
@@ -22,6 +25,8 @@ class Peer:
         
         if message.get("type") == "hello":
             logging.info(f"Received handshake from {addr}")
+            self.add_peer(addr)  # Add the new peer
+            print(self)
             ack_message = {"type": "ack", "payload": "Handshake acknowledged"}
             writer.write(json.dumps(ack_message).encode() + b'\n')
             await writer.drain()
@@ -129,9 +134,11 @@ class Peer:
         with open("peers.dat", "w") as f:
             for peer in self.peers:
                 f.write(f"{peer}\n")
+        logging.info("Peers file updated.")
 
     def load_peers(self):
         if os.path.exists("peers.dat"):
             with open("peers.dat", "r") as f:
                 for line in f:
                     self.peers.add(line.strip())
+        logging.info("Peers loaded from file.")
