@@ -3,7 +3,7 @@ from peer import Peer
 from rpc import RPCServer
 
 async def main():
-    host = '127.0.0.1'
+    host = '0.0.0.0'
     p2p_port = 4333
     rpc_port = 4334
     seeds = ['137.184.80.215']  # Example seed IP
