@@ -12,12 +12,20 @@ class Peer:
         self.server_id = str(uuid.uuid4())
         self.host = host
         self.p2p_port = p2p_port
-        self.peers = set(seeds if seeds else [])
+        self.peers = set(seeds if seeds else [])  # Initial seed list of peers
         self.hello_seq = 0
         self.external_ip = self.detect_ip_address()
         self.load_peers()
         self.rewrite_peers_file()
 
+    async def start_p2p_server(self):
+        """Starts the P2P server to listen for incoming connections."""
+        server = await asyncio.start_server(self.handle_peer_connection, self.host, self.p2p_port)
+        logging.info(f"P2P server {self.server_id} listening on {self.host}:{self.p2p_port}")
+        
+        async with server:
+            await server.serve_forever()
+            
     async def handle_peer_connection(self, reader, writer):
         addr = writer.get_extra_info('peername')
         logging.info(f"Connected to peer {addr}")
@@ -25,18 +33,56 @@ class Peer:
 
         if ip == self.host or ip == self.external_ip or ip == "127.0.0.1":
             logging.info("Detected attempt to connect to self. Ignoring.")
-            writer.close()
-            await writer.wait_closed()
             return
 
-        # Continuously listen for and process messages
-        await self.listen_for_messages(reader, writer, addr)
+        try:
+            while True:
+                data = await reader.readline()
+                if not data:
+                    logging.info(f"Connection closed by peer {addr}")
+                    break
 
-    async def start_p2p_server(self):
-        server = await asyncio.start_server(self.handle_peer_connection, self.host, self.p2p_port)
-        logging.info(f"P2P server {self.server_id} listening on {self.host}:{self.p2p_port}")
-        async with server:
-            await server.serve_forever()
+                message = json.loads(data.decode())
+                logging.info(f"Received message from {addr}: {message}")
+
+                if message.get("type") == "hello":
+                    logging.info(f"Received handshake from {addr}")
+                    self.add_peer(ip)
+                    ack_message = {"type": "ack", "payload": "Handshake acknowledged"}
+                    writer.write(json.dumps(ack_message).encode() + b'\n')
+                    await writer.drain()
+                    logging.info(f"Handshake acknowledged to {addr}")
+                elif message.get("type") == "heartbeat":
+                    logging.info(f"Heartbeat received from {addr}")
+                    response = {"type": "heartbeat_ack", "payload": "pong"}
+                    writer.write(json.dumps(response).encode() + b'\n')
+                    await writer.drain()
+                elif message.get("type") == "request_peer_list":
+                    logging.info(f"Peer list requested by {addr}")
+                    await self.send_peer_list(writer)
+                else:
+                    logging.info(f"Unhandled message type from {addr}: {message['type']}")
+
+        except asyncio.TimeoutError:
+            logging.info(f"Timeout while waiting for messages from {addr}")
+        except Exception as e:
+            logging.error(f"Error during communication with {addr}: {e}")
+        finally:
+            logging.info(f"Closing connection with {addr}")
+            writer.close()
+            await writer.wait_closed()
+
+    async def send_peer_list(self, writer):
+        peer_list_message = {
+            "type": "peer_list",
+            "payload": list(self.peers),
+            "server_id": self.server_id
+        }
+        writer.write(json.dumps(peer_list_message).encode() + b'\n')
+        await writer.drain()
+        logging.info("Sent peer list to a peer.")
+
+    # Remaining methods: start_p2p_server, connect_to_peer, send_heartbeat, listen_for_messages, detect_ip_address, load_peers, add_peer, rewrite_peers_file
 
     async def connect_to_peer(self, host, port, max_retries=5):
         if host in [self.host, self.external_ip, "127.0.0.1"]:
@@ -61,13 +107,27 @@ class Peer:
                 writer.write(json.dumps(handshake_msg).encode() + b'\n')
                 await writer.drain()
 
-                # After handshake, start listening for messages and sending heartbeats
-                asyncio.create_task(self.listen_for_messages(reader, writer, (host, port)))
-                asyncio.create_task(self.send_heartbeat(writer))
-                break
+                data = await reader.readline()
+                ack_message = json.loads(data.decode())
+                if ack_message.get("type") == "ack":
+                    logging.info(f"Handshake acknowledged by {host}:{port}")
+                    request_message = {"type": "request_peer_list", "server_id": self.server_id}
+                    writer.write(json.dumps(request_message).encode() + b'\n')
+                    await writer.drain()
+                    logging.info("Requested peer list.")
+                    asyncio.create_task(self.listen_for_messages(reader, writer, (host, port)))
+                    asyncio.create_task(self.send_heartbeat(writer))
+                    break
+                else:
+                    logging.info(f"Unexpected response from {host}:{port}")
+                    break
+                attempt += 1
+                backoff = min(2 ** attempt + random.uniform(0, 1), 60)
+                await asyncio.sleep(backoff)
         finally:
             if writer:
-                logging.info("Connection setup completed with {}:{}".format(host, port))
+                writer.close()
+                await writer.wait_closed()
 
     async def listen_for_messages(self, reader, writer, addr):
         try:
@@ -78,31 +138,21 @@ class Peer:
                     break
                 message = json.loads(data.decode())
                 logging.info(f"Received message from {addr}: {message}")
-                
-                if message.get("type") == "heartbeat":
-                    logging.info(f"Heartbeat received from {addr}")
-                    # Respond to heartbeat with an acknowledgment
-                    response = {"type": "heartbeat_ack", "payload": "pong", "server_id": self.server_id}
-                    writer.write(json.dumps(response).encode() + b'\n')
-                    await writer.drain()
+                if message.get("type") == "peer_list":
+                    logging.info("Received peer list.")
+                    new_peers = message.get("payload", [])
+                    for peer in new_peers:
+                        if peer != self.detect_ip_address():  # Avoid adding self to peer list
+                            self.add_peer(peer)
+                    self.rewrite_peers_file()
                 elif message.get("type") == "heartbeat_ack":
-                    # Handle the heartbeat acknowledgment
                     logging.info(f"Heartbeat acknowledgment received from {addr}")
-                else:
-                    logging.info(f"Unhandled message type from {addr}: {message['type']}")
+                # Handle other message types as necessary
         except Exception as e:
             logging.error(f"Error during communication with {addr}: {e}")
         finally:
             writer.close()
             await writer.wait_closed()
-
-    async def send_heartbeat(self, writer):
-        while not writer.is_closing():
-            heartbeat_msg = {"type": "heartbeat", "payload": "ping", "server_id": self.server_id}
-            logging.info("Sending heartbeat.")
-            writer.write(json.dumps(heartbeat_msg).encode() + b'\n')
-            await writer.drain()
-            await asyncio.sleep(30)  # Adjust the frequency as needed
 
     def detect_ip_address(self):
         try:
