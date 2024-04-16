@@ -43,28 +43,29 @@ class Peer:
             logging.info(f"Handshake acknowledged to {addr}")
         
         while True:
+            logging.info(f"Starting heartbeat loop to {host}:{port}")
             try:
-                data = await asyncio.wait_for(reader.readline(), timeout=30.0)  # Adjust timeout as needed
-                if not data:
-                    logging.info(f"Connection closed by {addr}")
-                    break
-                message = json.loads(data.decode())
-                logging.info(f"Received {message} from {addr}")
-
-                if message.get("type") == "heartbeat":
-                    logging.info(f"Heartbeat received from {addr}")
-                    response = {"type": "heartbeat_ack", "payload": "pong"}
-                    writer.write(json.dumps(response).encode() + b'\n')
+                while True:
+                    heartbeat_msg = {"type": "heartbeat", "payload": "ping"}
+                    logging.info(f"Sending heartbeat to {host}:{port}")
+                    writer.write(json.dumps(heartbeat_msg).encode() + b'\n')
                     await writer.drain()
+                    
+                    # Log when waiting for heartbeat acknowledgment
+                    logging.info(f"Waiting for heartbeat ack from {host}:{port}")
+                    ack_data = await asyncio.wait_for(reader.readline(), timeout=300)  # Adjust based on expected frequency
+                    if ack_data:
+                        logging.info(f"Received heartbeat ack from {host}:{port}")
+                    else:
+                        logging.error(f"No heartbeat ack from {host}:{port}, closing connection.")
+                        break
+                    
+                    await asyncio.sleep(60)  # Adjust frequency as needed
             except asyncio.TimeoutError:
-                logging.info(f"Heartbeat timeout for {addr}")
-                break  # Consider rethinking this if premature disconnections persist
-            except Exception as e:
-                logging.error(f"Error handling message from {addr}: {e}")
-                break
-
-        writer.close()
-        await writer.wait_closed()
+                logging.error(f"Heartbeat ack not received within the expected timeframe from {host}:{port}.")
+            finally:
+                writer.close()
+                await writer.wait_closed()
 
     async def start_p2p_server(self):
         server = await asyncio.start_server(self.handle_peer_connection, self.host, self.p2p_port)
