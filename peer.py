@@ -263,7 +263,7 @@ class Peer:
         else:
             logging.info(f"Unhandled message type from {addr}: {message['type']}")
 
-async def connect_to_server(self):
+    async def connect_to_server(self):
         while True:
             try:
                 reader, writer = await asyncio.open_connection(self.server_host, self.server_port)
