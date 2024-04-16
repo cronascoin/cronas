@@ -20,13 +20,13 @@ class Peer:
     async def handle_peer_connection(self, reader, writer):
         addr = writer.get_extra_info('peername')
         logging.info(f"Connected to peer {addr}")
-        
+        ip = addr[0]
         data = await reader.readline()
         message = json.loads(data.decode())
         
         if message.get("type") == "hello":
             logging.info(f"Received handshake from {addr}")
-            self.add_peer(addr)  # Add the new peer
+            self.add_peer(ip)  # Add the new peer
             ack_message = {"type": "ack", "payload": "Handshake acknowledged"}
             writer.write(json.dumps(ack_message).encode() + b'\n')
             await writer.drain()
