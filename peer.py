@@ -30,7 +30,7 @@ class Peer:
                 if not data:
                     if reader.at_eof():
                         logging.info("Peer disconnected gracefully. Exiting listen loop.")
-                        break
+                        #break
                     else:
                         logging.info("No data received. Waiting for more data...")
                         await asyncio.sleep(1)
