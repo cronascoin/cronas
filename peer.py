@@ -42,14 +42,32 @@ class Peer:
 
                 if message.get("type") == "hello":
                     logging.info(f"Received handshake from {addr}")
-                    self.add_peer(ip)
-                    ack_message = {"type": "ack", "payload": "Handshake acknowledged"}
+                    self.add_peer(ip)  # Assuming this method adds the peer to some list and saves it if needed.
+                    ack_message = {
+                        "type": "ack",
+                        "payload": "Handshake acknowledged",
+                        "server_id": self.server_id
+                    }
                     writer.write(json.dumps(ack_message).encode() + b'\n')
                     await writer.drain()
                     logging.info(f"Handshake acknowledged to {addr}")
+
                 elif message.get("type") == "request_peer_list":
                     logging.info(f"Peer list requested by {addr}")
                     await self.send_peer_list(writer)
+
+                elif message.get("type") == "heartbeat":
+                    logging.info(f"Heartbeat received from {addr}")
+                    # Send a heartbeat acknowledgment
+                    ack_message = {
+                        "type": "heartbeat_ack",
+                        "payload": "pong",
+                        "server_id": self.server_id
+                    }
+                    writer.write(json.dumps(ack_message).encode() + b'\n')
+                    await writer.drain()
+                    logging.info("Heartbeat acknowledged to {}".format(addr))
+
                 else:
                     logging.info(f"Unhandled message type from {addr}: {message['type']}")
 
