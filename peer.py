@@ -68,7 +68,7 @@ class Peer:
             await server.serve_forever()
 
     async def connect_to_peer(self, host, port, max_retries=5):
-        if host == self.host and port == self.p2p_port:
+        if host == self.host:
             return
         
         attempt = 0
