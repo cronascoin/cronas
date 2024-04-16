@@ -3,9 +3,9 @@ import json
 import logging
 
 class RPCServer:
-    def __init__(self, peer, host, rpc_port):
+    def __init__(self, peer, rpc, rpc_port):
         self.peer = peer
-        self.host = host
+        self.host = rpc
         self.rpc_port = rpc_port
 
     async def start_rpc_server(self):
