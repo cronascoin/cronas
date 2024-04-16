@@ -24,48 +24,52 @@ class Peer:
         logging.info(f"Connected to peer {addr}")
         ip, _ = addr
 
-        # Prevent the server from adding or communicating with itself
+        # Prevent connection to self
         if ip == self.host or ip == self.external_ip or ip == "127.0.0.1":
             logging.info("Detected attempt to connect to self. Ignoring.")
             writer.close()
             await writer.wait_closed()
             return
 
-        data = await reader.readline()
-        message = json.loads(data.decode())
-        
-        if message.get("type") == "hello":
-            logging.info(f"Received handshake from {addr}")
-            self.add_peer(ip)  # Add the new peer
-            ack_message = {"type": "ack", "payload": "Handshake acknowledged"}
-            writer.write(json.dumps(ack_message).encode() + b'\n')
-            await writer.drain()
-            logging.info(f"Handshake acknowledged to {addr}")
-        
-        while True:
-            logging.info(f"Starting heartbeat loop to {host}:{port}")
-            try:
-                while True:
-                    heartbeat_msg = {"type": "heartbeat", "payload": "ping"}
-                    logging.info(f"Sending heartbeat to {host}:{port}")
-                    writer.write(json.dumps(heartbeat_msg).encode() + b'\n')
+        try:
+            # Initial message (handshake)
+            data = await reader.readline()
+            message = json.loads(data.decode())
+
+            if message.get("type") == "hello":
+                logging.info(f"Received handshake from {addr}")
+                self.add_peer(ip)  # Add the new peer
+                ack_message = {"type": "ack", "payload": "Handshake acknowledged"}
+                writer.write(json.dumps(ack_message).encode() + b'\n')
+                await writer.drain()
+                logging.info(f"Handshake acknowledged to {addr}")
+
+            # Message handling loop
+            while True:
+                data = await asyncio.wait_for(reader.readline(), timeout=30.0)
+                if not data:
+                    logging.info(f"Connection closed by {addr}")
+                    break
+
+                message = json.loads(data.decode())
+                logging.info(f"Received message from {addr}: {message}")
+
+                if message.get("type") == "heartbeat":
+                    logging.info(f"Heartbeat received from {addr}")
+                    response = {"type": "heartbeat_ack", "payload": "pong"}
+                    writer.write(json.dumps(response).encode() + b'\n')
                     await writer.drain()
+                else:
+                    logging.info(f"Unhandled message type from {addr}: {message['type']}")
                     
-                    # Log when waiting for heartbeat acknowledgment
-                    logging.info(f"Waiting for heartbeat ack from {host}:{port}")
-                    ack_data = await asyncio.wait_for(reader.readline(), timeout=300)  # Adjust based on expected frequency
-                    if ack_data:
-                        logging.info(f"Received heartbeat ack from {host}:{port}")
-                    else:
-                        logging.error(f"No heartbeat ack from {host}:{port}, closing connection.")
-                        break
-                    
-                    await asyncio.sleep(60)  # Adjust frequency as needed
-            except asyncio.TimeoutError:
-                logging.error(f"Heartbeat ack not received within the expected timeframe from {host}:{port}.")
-            finally:
-                writer.close()
-                await writer.wait_closed()
+        except asyncio.TimeoutError:
+            logging.info(f"Heartbeat timeout for {addr}")
+        except Exception as e:
+            logging.error(f"Error handling message from {addr}: {e}")
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            logging.info(f"Connection with {addr} fully closed.")
 
     async def start_p2p_server(self):
         server = await asyncio.start_server(self.handle_peer_connection, self.host, self.p2p_port)
