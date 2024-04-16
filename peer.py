@@ -147,21 +147,27 @@ class Peer:
                 data = await reader.readline()
                 if not data:
                     logging.info("Peer disconnected.")
-                    break
+                    break  # Exit the loop if the connection is closed
+
                 message = json.loads(data.decode())
                 logging.info(f"Received message: {message}")
+
                 if message.get("type") == "peer_list":
                     logging.info("Received peer list.")
-                    new_peers = message.get("payload", [])
-                    for peer in new_peers:
-                        if peer != self.detect_ip_address():  # Avoid adding self to the peer list
-                            self.add_peer(peer)
-                    self.rewrite_peers_file()
+                    self.update_peers(message['payload'])
                 elif message.get("type") == "heartbeat_ack":
                     logging.info("Heartbeat acknowledgment received.")
-                # Handle other message types as necessary
+                    # No action needed, just logging
+                elif message.get("type") == "heartbeat":
+                    self.respond_to_heartbeat(writer, message)
+                else:
+                    logging.info(f"Unhandled message type: {message['type']}")
         except Exception as e:
             logging.error(f"Error in communication: {e}")
+        finally:
+            logging.info("Closing connection.")
+            writer.close()
+            await writer.wait_closed()
 
     async def send_heartbeat(self, writer):
         while not writer.is_closing():
@@ -201,3 +207,15 @@ class Peer:
             return
         self.peers.add(ip)
         self.rewrite_peers_file()
+
+    def update_peers(self, new_peers):
+        for peer in new_peers:
+            if peer != self.external_ip and peer not in self.peers:
+                self.peers.add(peer)
+                self.rewrite_peers_file()
+                logging.info(f"Peer {peer} added to the list.")
+
+    def respond_to_heartbeat(self, writer, message):
+        ack_message = {"type": "heartbeat_ack", "payload": "pong", "server_id": self.server_id}
+        writer.write(json.dumps(ack_message).encode() + b'\n')
+        asyncio.create_task(writer.drain())
