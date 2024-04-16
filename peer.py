@@ -21,6 +21,11 @@ class Peer:
         addr = writer.get_extra_info('peername')
         logging.info(f"Connected to peer {addr}")
         ip = addr[0]
+        if ip == self.host
+            logging.info("Server attempted to connect to itself. Ignoring.")
+            writer.close()
+            await writer.wait_closed()
+            return
         data = await reader.readline()
         message = json.loads(data.decode())
         
@@ -63,6 +68,9 @@ class Peer:
             await server.serve_forever()
 
     async def connect_to_peer(self, host, port, max_retries=5):
+        if host == self.host and port == self.p2p_port:
+            return
+        
         attempt = 0
         writer = None
 
