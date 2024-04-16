@@ -4,6 +4,7 @@ import logging
 import os
 import socket
 import uuid
+import random
 
 logging.basicConfig(level=logging.INFO)
 
@@ -100,11 +101,23 @@ class Peer:
                 writer.write(json.dumps(handshake_msg).encode() + b'\n')
                 await writer.drain()
 
-                # Corrected call to listen_for_messages without address
-                asyncio.create_task(self.listen_for_messages(reader, writer))
-                # If send_heartbeat is defined to accept writer, keep this line as is
-                asyncio.create_task(self.send_heartbeat(writer))
-                break
+                data = await reader.readline()
+                ack_message = json.loads(data.decode())
+                if ack_message.get("type") == "ack":
+                    logging.info(f"Handshake acknowledged by {host}:{port}")
+                    request_message = {"type": "request_peer_list", "server_id": self.server_id}
+                    writer.write(json.dumps(request_message).encode() + b'\n')
+                    await writer.drain()
+                    logging.info("Requested peer list.")
+                    asyncio.create_task(self.listen_for_messages(reader, writer))
+                    asyncio.create_task(self.send_heartbeat(writer))
+                    break
+                else:
+                    logging.info(f"Unexpected response from {host}:{port}")
+                    break
+            attempt += 1
+            backoff = min(2 ** attempt + random.uniform(0, 1), 60)
+            await asyncio.sleep(backoff)
         finally:
             if writer:
                 writer.close()
