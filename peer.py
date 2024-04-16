@@ -68,6 +68,7 @@ class Peer:
             await server.serve_forever()
 
     async def connect_to_peer(self, host, port, max_retries=5):
+        print(f"self: {self} host: {host} port: {port}")
         if host == self.host:
             return
         
