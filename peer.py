@@ -13,6 +13,7 @@ class Peer:
         self.host = host
         self.p2p_port = p2p_port
         self.peers = set(seeds if seeds else [])
+        self.hello_seq = 0
         self.load_peers()
         self.rewrite_peers_file()
 
@@ -26,7 +27,6 @@ class Peer:
         if message.get("type") == "hello":
             logging.info(f"Received handshake from {addr}")
             self.add_peer(addr)  # Add the new peer
-            print(self)
             ack_message = {"type": "ack", "payload": "Handshake acknowledged"}
             writer.write(json.dumps(ack_message).encode() + b'\n')
             await writer.drain()
@@ -58,7 +58,7 @@ class Peer:
 
     async def start_p2p_server(self):
         server = await asyncio.start_server(self.handle_peer_connection, self.host, self.p2p_port)
-        logging.info(f"P2P server listening on {self.host}:{self.p2p_port}")
+        logging.info(f"P2P server {self.server_id} listening on {self.host}:{self.p2p_port}")
         async with server:
             await server.serve_forever()
 
@@ -66,69 +66,58 @@ class Peer:
         attempt = 0
         writer = None
 
-        while attempt < max_retries:
-            try:
-                logging.info(f"Attempt {attempt + 1} to connect to {host}:{port}")
-                reader, writer = await asyncio.open_connection(host, port)
-                
-                # Send handshake message
-                handshake_msg = {"type": "hello", "payload": f"Hello from {self.host}"}
-                writer.write(json.dumps(handshake_msg).encode() + b'\n')
-                await writer.drain()
-                
-                # Wait for handshake acknowledgment
-                data = await reader.readline()
-                ack_message = json.loads(data.decode())
-                if ack_message.get("type") == "ack":
-                    logging.info(f"Handshake acknowledged by {host}:{port}")
+        try:
+            while attempt < max_retries:
+                try:
+                    logging.info(f"Attempt {attempt + 1} to connect to {host}:{port}")
+                    reader, writer = await asyncio.open_connection(host, port)
                     
-                    # Keep the connection open for further communication
-                    try:
-                        while True:
-                            # Send a heartbeat message every 60 seconds
-                            heartbeat_msg = {"type": "heartbeat", "payload": "ping"}
-                            writer.write(json.dumps(heartbeat_msg).encode() + b'\n')
-                            await writer.drain()
-                            
-                            # Wait for heartbeat acknowledgment with a 5 minutes timeout
-                            data = await asyncio.wait_for(reader.readline(), timeout=300)  # 5 minutes timeout
-                            if not data:
-                                logging.info("Connection closed by the server.")
-                                break
-                            ack_message = json.loads(data.decode())
-                            if ack_message.get("type") == "heartbeat_ack":
-                                logging.info("Heartbeat acknowledged by the server.")
-                            else:
-                                logging.info("Unexpected message from the server.")
-                            
-                            await asyncio.sleep(60)  # Sleep for 60 seconds before sending the next heartbeat
-                            
-                    except asyncio.TimeoutError:
-                        logging.error("Heartbeat ack not received within the expected 5 minutes timeframe.")
-                    break
+                    # Increment and send handshake message with sequence number
+                    self.hello_seq += 1
+                    handshake_msg = {
+                        "type": "hello",
+                        "payload": f"Hello from {self.host}",
+                        "seq": self.hello_seq,  # Include the sequence number
+                        "server_id": self.server_id  # Include the server ID
+                    }
+                    writer.write(json.dumps(handshake_msg).encode() + b'\n')
+                    await writer.drain()
                     
-                else:
-                    logging.info(f"Unexpected response from {host}:{port}")
-                    break
+                    # Wait for handshake acknowledgment
+                    data = await reader.readline()
+                    ack_message = json.loads(data.decode())
+                    if ack_message.get("type") == "ack":
+                        logging.info(f"Handshake acknowledged by {host}:{port}")
+                        # Your existing connection logic here...
+                        break  # Successfully connected, exit the loop
                     
-            except Exception as e:
-                logging.error(f"Connection attempt {attempt + 1} to {host}:{port} failed: {e}")
-                attempt += 1
+                    else:
+                        logging.info(f"Unexpected response from {host}:{port}")
+                        break  # Exit the loop, but try to cleanly close the connection in the finally block
                     
-                # Calculate exponential backoff with jitter
-                backoff = min(2 ** attempt + random.uniform(0, 1), 60)  # Cap the backoff at 60 seconds
-                logging.info(f"Waiting {backoff:.2f} seconds before next attempt...")
-                await asyncio.sleep(backoff)
+                except Exception as e:
+                    logging.error(f"Connection attempt {attempt + 1} to {host}:{port} failed: {e}")
+                    attempt += 1
+                    backoff = min(2 ** attempt + random.uniform(0, 1), 60)  # Cap the backoff at 60 seconds
+                    logging.info(f"Waiting {backoff:.2f} seconds before next attempt...")
+                    await asyncio.sleep(backoff)
 
-        if attempt == max_retries:
-            logging.error(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
-        else:
-            logging.info(f"Successfully connected to {host}:{port}.")
+        finally:
+            # Ensure the connection is closed if no longer needed
+            if writer is not None:
+                writer.close()
+                await writer.wait_closed()
+                logging.info("Connection closed.")
 
-        # Ensure the connection is closed if no longer needed
-        if writer is not None:
-            writer.close()
-            await writer.wait_closed()
+            if attempt == max_retries:
+                logging.error(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
+            else:
+                logging.info(f"Successfully connected to {host}:{port}.")
+
+            # Ensure the connection is closed if no longer needed
+            if writer is not None:
+                writer.close()
+                await writer.wait_closed()
 
     def rewrite_peers_file(self):
         with open("peers.dat", "w") as f:
@@ -142,3 +131,8 @@ class Peer:
                 for line in f:
                     self.peers.add(line.strip())
         logging.info("Peers loaded from file.")
+
+    def add_peer(self, ip):
+        # Assuming peers are stored in a set called self.peers
+        self.peers.add(ip)
+        self.rewrite_peers_file()
