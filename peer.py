@@ -44,7 +44,7 @@ class Peer:
         
         while True:
             try:
-                data = await asyncio.wait_for(reader.readline(), timeout=30.0)
+                data = await asyncio.wait_for(reader.readline(), timeout=30.0)  # Adjust timeout as needed
                 if not data:
                     logging.info(f"Connection closed by {addr}")
                     break
@@ -58,6 +58,9 @@ class Peer:
                     await writer.drain()
             except asyncio.TimeoutError:
                 logging.info(f"Heartbeat timeout for {addr}")
+                break  # Consider rethinking this if premature disconnections persist
+            except Exception as e:
+                logging.error(f"Error handling message from {addr}: {e}")
                 break
 
         writer.close()
