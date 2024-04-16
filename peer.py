@@ -4,6 +4,7 @@ import logging
 import os
 import random
 import uuid
+import socket
 
 logging.basicConfig(level=logging.INFO)
 
@@ -68,8 +69,8 @@ class Peer:
             await server.serve_forever()
 
     async def connect_to_peer(self, host, port, max_retries=5):
-        print(f"self: {self} host: {host} port: {port}")
-        if host == self.host:
+        myIp = self.detect_ip_address()
+        if myIp == host:
             return
         
         attempt = 0
@@ -134,6 +135,14 @@ class Peer:
                 f.write(f"{peer}\n")
         logging.info("Peers file updated.")
 
+    def detect_ip_address(self):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(('8.8.8.8', 80))
+                return s.getsockname()[0]
+        except Exception:
+            return '127.0.0.1'
+        
     def load_peers(self):
         if os.path.exists("peers.dat"):
             with open("peers.dat", "r") as f:
@@ -142,6 +151,7 @@ class Peer:
         logging.info("Peers loaded from file.")
 
     def add_peer(self, ip):
-        # Assuming peers are stored in a set called self.peers
+        if ip == self.detect_ip_address() or ip == "127.0.0.1":
+            return
         self.peers.add(ip)
         self.rewrite_peers_file()
