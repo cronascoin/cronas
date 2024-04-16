@@ -21,7 +21,7 @@ class Peer:
         addr = writer.get_extra_info('peername')
         logging.info(f"Connected to peer {addr}")
         ip = addr[0]
-        if ip == self.host
+        if ip == self.host:
             logging.info("Server attempted to connect to itself. Ignoring.")
             writer.close()
             await writer.wait_closed()
