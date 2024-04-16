@@ -27,49 +27,44 @@ class Peer:
         # Prevent connection to self
         if ip == self.host or ip == self.external_ip or ip == "127.0.0.1":
             logging.info("Detected attempt to connect to self. Ignoring.")
-            writer.close()
-            await writer.wait_closed()
             return
 
         try:
-            # Initial message (handshake)
-            data = await reader.readline()
-            message = json.loads(data.decode())
-
-            if message.get("type") == "hello":
-                logging.info(f"Received handshake from {addr}")
-                self.add_peer(ip)  # Add the new peer
-                ack_message = {"type": "ack", "payload": "Handshake acknowledged"}
-                writer.write(json.dumps(ack_message).encode() + b'\n')
-                await writer.drain()
-                logging.info(f"Handshake acknowledged to {addr}")
-
-            # Message handling loop
             while True:
-                data = await asyncio.wait_for(reader.readline(), timeout=30.0)
+                data = await reader.readline()
+                # Break the loop if the connection is closed
                 if not data:
-                    logging.info(f"Connection closed by {addr}")
+                    logging.info(f"Connection closed by peer {addr}")
                     break
 
                 message = json.loads(data.decode())
                 logging.info(f"Received message from {addr}: {message}")
 
-                if message.get("type") == "heartbeat":
+                # Process received message
+                if message.get("type") == "hello":
+                    logging.info(f"Received handshake from {addr}")
+                    self.add_peer(ip)  # Add the new peer
+                    ack_message = {"type": "ack", "payload": "Handshake acknowledged"}
+                    writer.write(json.dumps(ack_message).encode() + b'\n')
+                    await writer.drain()
+                    logging.info(f"Handshake acknowledged to {addr}")
+                elif message.get("type") == "heartbeat":
                     logging.info(f"Heartbeat received from {addr}")
                     response = {"type": "heartbeat_ack", "payload": "pong"}
                     writer.write(json.dumps(response).encode() + b'\n')
                     await writer.drain()
                 else:
                     logging.info(f"Unhandled message type from {addr}: {message['type']}")
-                    
+
         except asyncio.TimeoutError:
-            logging.info(f"Heartbeat timeout for {addr}")
+            logging.info(f"Timeout while waiting for messages from {addr}")
         except Exception as e:
-            logging.error(f"Error handling message from {addr}: {e}")
+            logging.error(f"Error during communication with {addr}: {e}")
         finally:
+            # Close the writer in the finally block to clean up properly on any exit.
+            logging.info(f"Closing connection with {addr}")
             writer.close()
             await writer.wait_closed()
-            logging.info(f"Connection with {addr} fully closed.")
 
     async def start_p2p_server(self):
         server = await asyncio.start_server(self.handle_peer_connection, self.host, self.p2p_port)
