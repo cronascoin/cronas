@@ -15,6 +15,10 @@ if you are using a lower version, please upgrade it.
 ```
 apt install pip
 ```
+or 
+```
+sudo apt install python3-pip
+```
 ```
 apt update && apt upgrade -y
 ```
