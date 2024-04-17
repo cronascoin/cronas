@@ -242,7 +242,7 @@ class Peer:
     def handle_peer_list(self, peer_data):
         """Processes received peer list and updates internal data structures."""
         try:
-            new_peers = [peer for peer in peer_data if peer not in self.peers                                   and peer != self.external_ip] 
+            new_peers = [peer for peer in peer_data if peer not in self.peers and peer != self.external_ip] 
             self.update_peers(new_peers)
             asyncio.create_task(self.connect_to_new_peers(new_peers))
         except Exception as e:
