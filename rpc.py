@@ -1,12 +1,16 @@
 from aiohttp import web
 import json
 import logging
+import signal
+
 
 class RPCServer:
-    def __init__(self, peer, rpc, rpc_port):
+    def __init__(self, peer, host, rpc_port):
         self.peer = peer
-        self.host = rpc
+        self.host = host
         self.rpc_port = rpc_port
+        self.app = web.Application()
+        self.runner = None
 
     async def start_rpc_server(self):
         app = web.Application()
@@ -14,11 +18,17 @@ class RPCServer:
             web.get('/peers', self.get_peers),
             web.post('/addnode', self.add_node)  # Register the route for adding a node
         ])
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, self.host, self.rpc_port)
+        self.runner = web.AppRunner(app)  # Use instance variable
+        await self.runner.setup()
+        site = web.TCPSite(self.runner, self.host, self.rpc_port)
         await site.start()
         logging.info(f"RPC server started on {self.host}:{self.rpc_port}")
+
+    async def close_rpc_server(self):
+        if self.runner:
+            await self.runner.cleanup()
+            logging.info("RPC Server closed.")
+
 
     async def get_peers(self, request):
         peers_list = list(self.peer.peers)

@@ -1,6 +1,18 @@
 import asyncio
+import logging
 from peer import Peer
 from rpc import RPCServer
+
+logging.basicConfig(level=logging.INFO)
+
+async def shutdown(peer, rpc_server):
+    """Gracefully shutdown the application."""
+    logging.info("Shutting down...")
+    
+    await peer.close_p2p_server()
+    await rpc_server.close_rpc_server()
+    
+    logging.info("Shutdown complete.")
 
 async def main():
     p2p = '0.0.0.0'
@@ -8,23 +20,24 @@ async def main():
     p2p_port = 4333
     rpc_port = 4334
     seeds = ['137.184.80.215']  # Example seed IP
-
-    # Instantiate the Peer object
-    peer = Peer(p2p, p2p_port, seeds)
     
-    # Instantiate the RPCServer object
+    peer = Peer(p2p, p2p_port, seeds)
     rpc_server = RPCServer(peer, rpc, rpc_port)
 
-    # Load existing peers from file
     peer.load_peers()
 
-    # Start the P2P server and RPC server, and initiate connections to seed peers
-    await asyncio.gather(
-        peer.start_p2p_server(),
-        rpc_server.start_rpc_server(),
-        # Initiate connections to each of the seed peers
-        *(peer.connect_to_peer(seed_ip, p2p_port) for seed_ip in seeds)
-    )
+    try:
+        await asyncio.gather(
+            peer.start_p2p_server(),
+            rpc_server.start_rpc_server(),
+            *(peer.connect_to_peer(seed_ip, p2p_port) for seed_ip in seeds)
+        )
+    except asyncio.CancelledError:
+        logging.info("CancelledError caught, shutting down.")
+        await shutdown(peer, rpc_server)
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("KeyboardInterrupt caught, shutting down.")

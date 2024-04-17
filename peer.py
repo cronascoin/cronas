@@ -5,6 +5,8 @@ import os
 import socket
 import uuid
 import random
+import signal
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -30,17 +32,18 @@ class Peer:
                 if not data:
                     if reader.at_eof():
                         logging.info("Peer disconnected gracefully. Exiting listen loop.")
-                        break
+                        break  # Only break if peer disconnected gracefully
                     else:
                         logging.info("No data received. Waiting for more data...")
                         await asyncio.sleep(1)
                         continue
-                
+                    
                 data_buffer += data.decode()
                 while '\n' in data_buffer:
                     message, data_buffer = data_buffer.split('\n', 1)
                     if message:
                         await self.process_message(json.loads(message), writer)
+                        # Do not break after processing; wait for more messages
 
         except Exception as e:
             logging.error(f"Error during communication with {addr}: {e}")
@@ -49,21 +52,30 @@ class Peer:
             writer.close()
             await writer.wait_closed()
 
+
     async def send_peer_list(self, writer):
         peer_list_message = {
             "type": "peer_list",
             "payload": list(self.peers),
-            "server_id": self.server_id
+            "server_id": self.server_id,
         }
         writer.write(json.dumps(peer_list_message).encode() + b'\n')
         await writer.drain()
         logging.info("Sent peer list to a peer.")
+        # Do not close the writer or break the loop here
 
     async def start_p2p_server(self):
-        server = await asyncio.start_server(self.handle_peer_connection, self.host, self.p2p_port)
+        self.p2p_server = await asyncio.start_server(
+            self.handle_peer_connection, self.host, self.p2p_port)
         logging.info(f"P2P server {self.server_id} listening on {self.host}:{self.p2p_port}")
-        async with server:
-            await server.serve_forever()
+        async with self.p2p_server:
+            await self.p2p_server.serve_forever()
+
+    async def close_p2p_server(self):
+        if self.p2p_server:
+            self.p2p_server.close()
+            await self.p2p_server.wait_closed()
+            logging.info("P2P server closed.")
 
     async def connect_to_peer(self, host, port, max_retries=5):
         if host in [self.host, self.external_ip, "127.0.0.1"]:
@@ -263,26 +275,15 @@ class Peer:
         else:
             logging.info(f"Unhandled message type from {addr}: {message['type']}")
 
-    async def connect_to_server(self):
-        while True:
-            try:
-                reader, writer = await asyncio.open_connection(self.server_host, self.server_port)
-                logging.info(f"Connected to server at {self.server_host}:{self.server_port}")
-                
-                # Example: Send a hello message upon connection
-                hello_message = json.dumps({"type": "hello", "payload": "Hello from client"})
-                writer.write(hello_message.encode() + b'\n')
-                await writer.drain()
-                
-                # Listen for messages from the server
-                await self.listen_for_messages(reader)
-                
-            except (ConnectionRefusedError, ConnectionResetError):
-                logging.error(f"Connection failed. Reconnecting in {self.reconnect_delay} seconds...")
-                await asyncio.sleep(self.reconnect_delay)
-            except asyncio.CancelledError:
-                logging.info("Connection task was cancelled. Exiting.")
-                break
-            except Exception as e:
-                logging.error(f"Unexpected error: {e}")
-                break
+    async def shutdown(peer, rpc_server):
+        logging.info("Shutting down...")
+
+        await peer.close_p2p_server()
+        await rpc_server.close_rpc_server()
+
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        
+        await asyncio.gather(*tasks, return_exceptions=True)
+        logging.info("Shutdown complete.")
