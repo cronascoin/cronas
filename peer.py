@@ -222,7 +222,7 @@ class Peer:
                 asyncio.create_task(self.connect_to_peer(peer_ip, self.p2p_port))
 
     async def send_heartbeat(self, writer):
-        """Sends a heartbeat message to the connected peer every 30 seconds."""
+        """Sends a heartbeat message to the connected peer every 60 seconds."""
         try:
             while not writer.is_closing():
                 heartbeat_msg = {
@@ -233,7 +233,7 @@ class Peer:
                 logging.info(f"Sending heartbeat to peer.")
                 writer.write(json.dumps(heartbeat_msg).encode() + b'\n')
                 await writer.drain()
-                await asyncio.sleep(30)  # Send a heartbeat every 30 seconds.
+                await asyncio.sleep(60)  # Send a heartbeat every 60 seconds.
         except asyncio.CancelledError:
             logging.info("Heartbeat sending task cancelled.")
         except Exception as e:
