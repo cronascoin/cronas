@@ -53,3 +53,5 @@ def main():
     else:
         print("Invalid command or arguments.")
 
+if __name__ == '__main__':
+    main()

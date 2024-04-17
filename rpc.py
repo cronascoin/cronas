@@ -12,6 +12,7 @@ class RPCServer:
         self.app = web.Application()
         self.runner = None
 
+
     async def start_rpc_server(self):
         app = web.Application()
         app.add_routes([
@@ -24,6 +25,7 @@ class RPCServer:
         await site.start()
         logging.info(f"RPC server started on {self.host}:{self.rpc_port}")
 
+
     async def close_rpc_server(self):
         if self.runner:
             await self.runner.cleanup()
@@ -33,6 +35,7 @@ class RPCServer:
     async def get_peers(self, request):
         peers_list = list(self.peer.peers)
         return web.Response(text=json.dumps(peers_list), content_type='application/json')
+
 
     async def add_node(self, request):
         # Example implementation of adding a node
@@ -44,6 +47,4 @@ class RPCServer:
             return web.Response(text=json.dumps({"message": "Node added successfully"}), content_type='application/json')
         else:
             return web.Response(status=400, text=json.dumps({"error": "Invalid request"}), content_type='application/json')
-
-if __name__ == '__main__':
-    asyncio.run(main())
+        
