@@ -83,13 +83,12 @@ class Peer:
             return
 
         attempt = 0
-        writer = None
 
-        try:
-            while attempt < max_retries:
+        while attempt < max_retries:
+            try:
                 logging.info(f"Attempt {attempt + 1} to connect to {host}:{port}")
                 reader, writer = await asyncio.open_connection(host, port)
-                
+
                 self.hello_seq += 1
                 handshake_msg = {
                     "type": "hello",
@@ -110,19 +109,29 @@ class Peer:
                     writer.write(json.dumps(request_message).encode() + b'\n')
                     await writer.drain()
                     logging.info("Requested peer list.")
-                    asyncio.create_task(self.listen_for_messages(reader, writer))
-                    asyncio.create_task(self.send_heartbeat(writer))
-                    break
+
+                    # Transition into listening for messages without closing the connection.
+                    await self.listen_for_messages(reader, writer)
+                    # If listen_for_messages returns, it means the connection was closed.
+                    return
                 else:
                     logging.info(f"Unexpected response from {host}:{port}")
-                    break
-            attempt += 1
-            backoff = min(2 ** attempt + random.uniform(0, 1), 60)
-            await asyncio.sleep(backoff)
-        finally:
-            if writer:
-                writer.close()
-                await writer.wait_closed()
+                    writer.close()
+                    await writer.wait_closed()
+                    return
+
+            except Exception as e:
+                logging.error(f"Failed to connect or communicate with {host}:{port}: {e}")
+
+            finally:
+                # Implementing a backoff before retrying to connect again.
+                attempt += 1
+                backoff = min(2 ** attempt + random.uniform(0, 1), 60)
+                await asyncio.sleep(backoff)
+
+        if writer is not None and not writer.is_closing():
+            writer.close()
+            await writer.wait_closed()
 
     async def listen_for_messages(self, reader, writer):
         data_buffer = ""  # Initialize a buffer for incoming data
