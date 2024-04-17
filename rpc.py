@@ -44,3 +44,6 @@ class RPCServer:
             return web.Response(text=json.dumps({"message": "Node added successfully"}), content_type='application/json')
         else:
             return web.Response(status=400, text=json.dumps({"error": "Invalid request"}), content_type='application/json')
+
+if __name__ == '__main__':
+    asyncio.run(main())
