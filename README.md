@@ -44,7 +44,15 @@ Currently the project is in development.
 
 ## Usage
 
-Instructions on how to use the project.
+For a list of peers
+```
+python3 cli.py peers
+```
+To add nodes
+```
+python3 cli.py addnode <ip address>
+```
+
 
 ## Contributing
 
