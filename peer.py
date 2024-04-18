@@ -146,6 +146,7 @@ class Peer:
                 await self.process_message(message, writer)
         except asyncio.IncompleteReadError:
             logging.info("Peer disconnected.")
+            asyncio.create_task(self.reconnect_to_peer(writer.get_extra_info('peername')))
         except Exception as e:
             logging.error(f"Error during communication with {addr}: {e}")
         finally:

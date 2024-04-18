@@ -11,6 +11,8 @@ async def shutdown(peer, rpc_server):
     
     await peer.close_p2p_server()
     await rpc_server.close_rpc_server()
+    
+    logging.info("Shutdown complete.")
 
 async def main():
     p2p = '0.0.0.0'
