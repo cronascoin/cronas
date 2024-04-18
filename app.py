@@ -5,14 +5,16 @@ from rpc import RPCServer
 
 logging.basicConfig(level=logging.INFO)
 
+
 async def shutdown(peer, rpc_server):
-    """Gracefully shutdown the application."""
+      
     logging.info("Shutting down...")
-    
+
     await peer.close_p2p_server()
     await rpc_server.close_rpc_server()
-    
+
     logging.info("Shutdown complete.")
+
 
 async def main():
     p2p = '0.0.0.0'

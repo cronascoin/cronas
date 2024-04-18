@@ -1,8 +1,6 @@
 from aiohttp import web
 import json
 import logging
-import signal
-
 
 class RPCServer:
     def __init__(self, peer, host, rpc_port):

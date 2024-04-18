@@ -5,7 +5,7 @@ import os
 import socket
 import uuid
 import random
-import signal
+
 
 
 logging.basicConfig(level=logging.INFO)
@@ -22,6 +22,15 @@ class Peer:
         self.hello_seq = 0  # Initialize the hello_seq attribute here
         self.reconnect_delay = 5  # seconds
             
+
+    async def start_p2p_server(self):
+        self.p2p_server = await asyncio.start_server(
+            self.handle_peer_connection, self.host, self.p2p_port)
+        logging.info(f"P2P server {self.server_id} listening on {self.host}:{self.p2p_port}")
+        async with self.p2p_server:
+            await self.p2p_server.serve_forever()
+
+
     async def handle_peer_connection(self, reader, writer):
         addr = writer.get_extra_info('peername')
         logging.info(f"Connected to peer {addr}")
@@ -64,18 +73,6 @@ class Peer:
         logging.info("Sent peer list to a peer.")
         # Do not close the writer or break the loop here
 
-    async def start_p2p_server(self):
-        self.p2p_server = await asyncio.start_server(
-            self.handle_peer_connection, self.host, self.p2p_port)
-        logging.info(f"P2P server {self.server_id} listening on {self.host}:{self.p2p_port}")
-        async with self.p2p_server:
-            await self.p2p_server.serve_forever()
-
-    async def close_p2p_server(self):
-        if self.p2p_server:
-            self.p2p_server.close()
-            await self.p2p_server.wait_closed()
-            logging.info("P2P server closed.")
 
     async def connect_to_peer(self, host, port, max_retries=5):
         if host in [self.host, self.external_ip, "127.0.0.1"]:
@@ -154,10 +151,12 @@ class Peer:
             writer.close()
             await writer.wait_closed()
 
+
     async def handle_client(reader, writer, peer):
         await peer.listen_for_messages(reader, writer)
         writer.close()
         await writer.wait_closed()
+
 
     def detect_ip_address(self):
         try:
@@ -166,6 +165,7 @@ class Peer:
                 return s.getsockname()[0]
         except Exception:
             return '127.0.0.1'
+
 
     def rewrite_peers_file(self):
         try:
@@ -186,11 +186,13 @@ class Peer:
                     self.peers.add(line.strip())
         logging.info("Peers loaded from file.")
 
+
     def add_peer(self, ip):
         if ip in [self.host, self.external_ip, "127.0.0.1"]:
             return
         self.peers.add(ip)
         self.rewrite_peers_file()
+
 
     def update_peers(self, new_peers):
         """Adds new peers to the list and updates the peers file."""
@@ -215,6 +217,7 @@ class Peer:
         writer.write(json.dumps(ack_message).encode() + b'\n')
         asyncio.create_task(writer.drain())
 
+
     async def connect_to_new_peers(self, new_peers):
         for peer_ip in new_peers:
             if peer_ip not in self.peers and peer_ip != self.external_ip:
@@ -226,6 +229,7 @@ class Peer:
                 logging.info(f"Attempting to connect to new peer: {peer_ip}")
                 # Asynchronously attempt to connect to the new peer.
                 asyncio.create_task(self.connect_to_peer(peer_ip, self.p2p_port))
+
 
     async def send_heartbeat(self, writer):
         """Sends a heartbeat message to the connected peer every 60 seconds."""
@@ -241,9 +245,10 @@ class Peer:
                 await writer.drain()
                 await asyncio.sleep(60)  # Send a heartbeat every 60 seconds.
         except asyncio.CancelledError:
-            logging.info("Shutdown Complete.")
+            logging.info("Closing heartbeat messages.")
         except Exception as e:
             logging.error(f"Error sending heartbeat: {e}")
+
 
     def handle_peer_list(self, peer_data):
         """Processes received peer list and updates internal data structures."""
@@ -253,6 +258,7 @@ class Peer:
             asyncio.create_task(self.connect_to_new_peers(new_peers))
         except Exception as e:
             logging.error(f"Error in handle_peer_list: {e}")
+
 
     async def process_message(self, message, writer):
         addr = writer.get_extra_info('peername')
@@ -302,21 +308,8 @@ class Peer:
             logging.info(f"Unhandled message type from {addr}: {message['type']}")
 
 
-    async def shutdown(peer, rpc_server):
-        logging.info("Cancelling all running tasks...")
-        
-        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        for task in tasks:
-            task.cancel()
-            try:
-                await task  # Wait for the task cancellation to complete
-            except asyncio.CancelledError:
-                pass  # Expected part of graceful shutdown
-        
-        logging.info("All running tasks cancelled, proceeding with server shutdowns...")
-        
-        await peer.close_p2p_server()
-        logging.info("P2P server closed.")
-        
-        await rpc_server.close_rpc_server()
-        logging.info("RPC Server closed.")
+    async def close_p2p_server(self):
+        if self.p2p_server:
+            self.p2p_server.close()
+            await self.p2p_server.wait_closed()
+            logging.info("P2P server closed.")
