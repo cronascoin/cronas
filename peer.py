@@ -134,31 +134,24 @@ class Peer:
             await writer.wait_closed()
 
     async def listen_for_messages(self, reader, writer):
-        data_buffer = ""  # Initialize a buffer for incoming data
+        addr = writer.get_extra_info('peername')
+        logging.info(f"Listening for messages from {addr}")
         try:
-            while not reader.at_eof():  # Check if the reader has reached EOF
-                data = await reader.read(1024)  # Read data from the reader
-                if not data:
-                    logging.info("No more data received, but connection remains open for new messages.")
-                    await asyncio.sleep(1)  # Wait a bit for new data to arrive
-                    continue  # Continue listening for new messages instead of closing immediately
-
-                data_buffer += data.decode()
-                while '\n' in data_buffer:  # Check if there are complete messages in the buffer
-                    line, data_buffer = data_buffer.split('\n', 1)  # Split the buffer into the complete message and the rest
-                    if line:  # If there's a complete message
-                        try:
-                            message = json.loads(line)
-                            logging.info(f"Received message: {message}")
-                            # Process the message (existing message handling logic goes here)
-                        except json.JSONDecodeError as e:
-                            logging.warning(f"Error decoding JSON ({e}), data: {line}")
+            while True:
+                data_buffer = await reader.readuntil(separator=b'\n')
+                if not data_buffer:
+                    logging.info("Connection closed by peer.")
+                    break
+                message = json.loads(data_buffer.decode().strip())
+                await self.process_message(message, writer)
+        except asyncio.IncompleteReadError:
+            logging.info("Peer disconnected.")
         except Exception as e:
-            logging.error(f"Error during message listening: {e}")
+            logging.error(f"Error during communication with {addr}: {e}")
         finally:
-            logging.info("Reader has reached EOF or an error occurred. Connection remains open for new messages.")
-            # Do not immediately close the writer; allow for the possibility of sending more data if protocol permits
-
+            logging.info(f"Closing connection with {addr}")
+            writer.close()
+            await writer.wait_closed()
 
     async def handle_client(reader, writer, peer):
         await peer.listen_for_messages(reader, writer)
@@ -174,10 +167,16 @@ class Peer:
             return '127.0.0.1'
 
     def rewrite_peers_file(self):
-        with open("peers.dat", "w") as f:
-            for peer in self.peers:
-                f.write(f"{peer}\n")
-        logging.info("Peers file updated.")
+        try:
+            with open("peers.dat", "w") as f:
+                for peer in self.peers:
+                    f.write(f"{peer}\n")
+            logging.info("Peers file updated successfully.")
+        except IOError as e:
+            logging.error(f"Failed to write to peers.dat: {e}")
+        except Exception as e:
+            logging.error(f"An unexpected error occurred while updating peers.dat: {e}")
+
 
     def load_peers(self):
         if os.path.exists("peers.dat"):
@@ -194,10 +193,16 @@ class Peer:
 
     def update_peers(self, new_peers):
         """Adds new peers to the list and updates the peers file."""
+        logging.info(f"Current peers before update: {self.peers}")  # Log current peers
         for peer in new_peers:
-            self.peers.add(peer)
-            logging.info(f"Peer {peer} added to the list.")
+            if peer not in self.peers:
+                self.peers.add(peer)
+                logging.info(f"Peer {peer} added to the list.")
+            else:
+                logging.info(f"Peer {peer} already in the list.")  # Log if peer is already known
         self.rewrite_peers_file()
+        logging.info(f"Current peers after update: {self.peers}")  # Log peers after update
+
         
     def respond_to_heartbeat(self, writer, message):
         """Send a heartbeat_ack in response to a heartbeat."""
@@ -251,6 +256,7 @@ class Peer:
     async def process_message(self, message, writer):
         addr = writer.get_extra_info('peername')
         logging.info(f"Received message from {addr}: {message}")
+
         if message.get("type") == "hello":
             logging.info(f"Received handshake from {addr}")
             # Acknowledge the handshake
@@ -280,19 +286,38 @@ class Peer:
             await writer.drain()
             logging.info("Heartbeat acknowledged to {}".format(addr))
 
-        # Add additional message types as necessary
+        elif message.get("type") == "peer_list":
+            logging.info(f"Received peer list from {addr}")
+            new_peers = message.get("payload", [])
+            if new_peers:
+                self.handle_peer_list(new_peers)
+            else:
+                logging.warning("Received empty peer list.")
+
         else:
             logging.info(f"Unhandled message type from {addr}: {message['type']}")
 
+
     async def shutdown(peer, rpc_server):
-        logging.info("Shutting down...")
-
-        await peer.close_p2p_server()
-        await rpc_server.close_rpc_server()
-
+        logging.info("Cancelling all running tasks...")
+        
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         for task in tasks:
             task.cancel()
+            try:
+                await task  # Wait for the task cancellation to complete
+            except asyncio.CancelledError:
+                pass  # Expected part of graceful shutdown
         
-        await asyncio.gather(*tasks, return_exceptions=True)
+        logging.info("All running tasks cancelled, proceeding with server shutdowns...")
+        
+        await peer.close_p2p_server()
+        logging.info("P2P server closed.")
+        
+        await rpc_server.close_rpc_server()
+        logging.info("RPC Server closed.")
+
+        await peer.send_heartbeat()
+        logging.info("Heartbeat Messaging closed.")
+
         logging.info("Shutdown complete.")
