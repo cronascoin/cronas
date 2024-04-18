@@ -7,7 +7,6 @@ logging.basicConfig(level=logging.INFO)
 
 
 async def shutdown(peer, rpc_server):
-      
     logging.info("Shutting down...")
 
     await peer.close_p2p_server()
