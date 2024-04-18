@@ -40,7 +40,7 @@ async def main():
             rpc_server.start_rpc_server(),
             *(peer.connect_to_peer(seed_ip, p2p_port) for seed_ip in seeds)
         )
-    except error
+    
     except asyncio.CancelledError:
         logging.info("CancelledError caught, shutting down.")
         await shutdown(peer, rpc_server)
