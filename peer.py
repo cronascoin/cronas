@@ -240,7 +240,7 @@ class Peer:
                 await writer.drain()
                 await asyncio.sleep(60)  # Send a heartbeat every 60 seconds.
         except asyncio.CancelledError:
-            logging.info("Heartbeat sending task cancelled.")
+            logging.info("Shutdown Complete.")
         except Exception as e:
             logging.error(f"Error sending heartbeat: {e}")
 
@@ -284,7 +284,7 @@ class Peer:
             }
             writer.write(json.dumps(ack_message).encode() + b'\n')
             await writer.drain()
-            logging.info("Heartbeat acknowledged to {}".format(addr))
+            logging.info(f"Heartbeat acknowledged to {addr}".format(addr))
 
         elif message.get("type") == "peer_list":
             logging.info(f"Received peer list from {addr}")
@@ -293,6 +293,9 @@ class Peer:
                 self.handle_peer_list(new_peers)
             else:
                 logging.warning("Received empty peer list.")
+        
+        elif message.get("type") == "heartbeat_ack":
+            logging.info(f"Heartbeat acknowledgment from {addr}")
 
         else:
             logging.info(f"Unhandled message type from {addr}: {message['type']}")
@@ -316,8 +319,3 @@ class Peer:
         
         await rpc_server.close_rpc_server()
         logging.info("RPC Server closed.")
-
-        await peer.send_heartbeat()
-        logging.info("Heartbeat Messaging closed.")
-
-        logging.info("Shutdown complete.")
