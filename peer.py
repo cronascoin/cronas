@@ -376,3 +376,28 @@ class Peer:
             await self.p2p_server.wait_closed()
             logging.info("P2P server closed.")
 
+    async def reconnect_to_peer(self, host, port):
+            """
+            Attempt to reconnect to a peer with an exponential backoff strategy.
+            """
+            peer_identifier = f"{host}:{port}"
+            logging.info(f"Attempting to reconnect to {peer_identifier}")
+
+            attempt = 0
+            while True:
+                if peer_identifier not in self.active_peers:
+                    try:
+                        await self.connect_to_peer(host, port)
+                        logging.info(f"Reconnected to {peer_identifier} successfully.")
+                        break  # Exit the loop upon successful reconnection
+                    except Exception as e:
+                        logging.error(f"Reconnection attempt to {peer_identifier} failed: {e}")
+                else:
+                    logging.info(f"Already connected to {peer_identifier}. No need to reconnect.")
+                    break  # Exit the loop if already reconnected
+
+                # Calculate the delay for the next reconnection attempt using exponential backoff
+                delay = self.calculate_backoff(attempt)
+                logging.info(f"Waiting for {delay} seconds before next reconnection attempt to {peer_identifier}.")
+                await asyncio.sleep(delay)
+                attempt += 1
