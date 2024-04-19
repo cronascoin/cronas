@@ -49,6 +49,7 @@ class Peer:
             
     async def handle_peer_connection(self, reader, writer):
         addr = writer.get_extra_info('peername')
+        self.active_peers.add(addr)
         logging.info(f"Connected to peer {addr}")
         try:
             data_buffer = ""
@@ -95,22 +96,21 @@ class Peer:
             logging.info("Attempted to connect to self. Skipping.")
             return
         
-        peer_identifier = f"{host}:{port}"
-        self.connecting_peers.add(peer_identifier)
+        self.connecting_peers.add(host)
         
-        if peer_identifier in self.active_peers:
-            logging.info(f"Already connected to {peer_identifier}. Skipping.")
+        if host in self.active_peers:
+            logging.info(f"Already connected to {host}. Skipping.")
             return
         
         current_time = time.time()
-        last_attempt, attempt_count = self.retry_attempts.get(peer_identifier, (0, 0))
+        last_attempt, attempt_count = self.retry_attempts.get(host, (0, 0))
         cooldown = self.calculate_backoff(attempt_count)
 
         if current_time - last_attempt < cooldown:
-            logging.info(f"Cooldown period active for {peer_identifier}. Skipping attempt.")
+            logging.info(f"Cooldown period active for {host}. Skipping attempt.")
             return
 
-        self.retry_attempts[peer_identifier] = (current_time, attempt_count + 1)
+        self.retry_attempts[host] = (current_time, attempt_count + 1)
 
         attempt = 0
         connected = False
@@ -136,9 +136,9 @@ class Peer:
                     ack_message = json.loads(data.decode())
                     if ack_message.get("type") == "ack":
                         logging.info(f"Handshake acknowledged by {host}:{port}")
-                        self.active_peers.add(peer_identifier)
-                        logging.info(f"Successfully connected to {peer_identifier}.")
-                        self.retry_attempts[peer_identifier] = (0, 0)  # Reset retry attempts after a successful connection
+                        logging.info(f"Successfully connected to {host}:{port}")
+                        self.peers.add(host)
+                        self.retry_attempts[host] = (0, 0)  # Reset retry attempts after a successful connection
                         connected = True
                         asyncio.create_task(self.send_heartbeat(writer))
                         request_message = {"type": "request_peer_list", "server_id": self.server_id}
@@ -167,13 +167,13 @@ class Peer:
                         await asyncio.sleep(backoff)
 
         finally:  # This finally is now clearly associated with the try block
-            self.connecting_peers.discard(peer_identifier)
+            self.connecting_peers.add(host)
             if writer is not None and not writer.is_closing():
                 writer.close()
                 await writer.wait_closed()
 
         if not connected:
-            logging.info(f"Max attempts reached for {peer_identifier}. Will retry later.")
+            logging.info(f"Max attempts reached for {host}. Will retry later.")
 
 
 
@@ -247,24 +247,33 @@ class Peer:
         logging.info("Peers loaded from file.")
 
 
-    def add_peer(self, ip):
+    def add_peer(self, peer_info):
+        # Assuming peer_info could be just an IP or "IP:Port", we split and take the first part (IP)
+        ip = peer_info.split(":")[0]
         if ip in [self.host, self.external_ip, "127.0.0.1"]:
+            logging.info(f"Skipping adding self or localhost to peers: {ip}")
             return
-        self.peers.add(ip)
-        self.rewrite_peers_file()
+        if ip not in self.peers:
+            self.peers.add(ip)
+            self.rewrite_peers_file()
+            logging.info(f"Added new peer: {ip}")
 
 
     def update_peers(self, new_peers):
         """Adds new peers to the list and updates the peers file."""
-        logging.info(f"Current peers before update: {self.peers}")  # Log current peers
+        updated = False
         for peer in new_peers:
-            if peer not in self.peers:
+            if peer not in self.peers and peer != self.external_ip:
                 self.peers.add(peer)
                 logging.info(f"Peer {peer} added to the list.")
+                updated = True
             else:
-                logging.info(f"Peer {peer} already in the list.")  # Log if peer is already known
-        self.rewrite_peers_file()
-        logging.info(f"Current peers after update: {self.peers}")  # Log peers after update
+                logging.info(f"Peer {peer} already in the list.")
+        
+        if updated:
+            self.rewrite_peers_file()
+        logging.info("Peers file updated successfully.")
+
 
         
     def respond_to_heartbeat(self, writer, message):
@@ -283,17 +292,18 @@ class Peer:
         for peer_info in new_peers:
             host = peer_info
             port = self.p2p_port
-            peer_identifier = f"{host}:{port}"
 
             # Check if the peer is the node itself or if it's already in the list of active or connecting peers
-            if peer_identifier == f"{self.external_ip}:{self.p2p_port}" or \
-                peer_identifier in self.active_peers or \
-                peer_identifier in self.connecting_peers:
-                logging.info(f"Skipping connection to {peer_identifier}.")
+            if host == self.external_ip or \
+                host in self.active_peers or \
+                host in self.connecting_peers:
+    
+                logging.info(f"Skipping connection to {host}.")
                 continue
 
             # Now attempt to connect to the peer
-            logging.info(f"Attempting to connect to new peer: {peer_identifier}")
+            logging.info(f"Attempting to connect to new peer: {host}")
+            self.connecting_peers.add(host)
             asyncio.create_task(self.connect_to_peer(host, port))
 
 
@@ -319,9 +329,12 @@ class Peer:
     async def handle_peer_list(self, peer_data):
         """Processes received peer list and updates internal data structures."""
         try:
-            new_peers = set(peer for peer in peer_data if peer not in self.peers and peer != self.external_ip)
+            logging.info("Processing new peer list...")
+            new_peers = set(peer_data) - self.peers - {self.external_ip}
             self.update_peers(new_peers)
-            await self.connect_to_new_peers(new_peers)  # Connect to new peers asynchronously
+            
+            # Optionally, if you want to immediately attempt to connect to these new peers:
+            await self.connect_to_new_peers(new_peers)
         except Exception as e:
             logging.error(f"Error in handle_peer_list: {e}")
 
@@ -390,13 +403,13 @@ class Peer:
 
             attempt = 0
             while True:
-                if peer_identifier not in self.active_peers:
+                if host not in self.active_peers:
                     try:
                         await self.connect_to_peer(host, port)
-                        logging.info(f"Reconnected to {peer_identifier} successfully.")
+                        logging.info(f"Reconnected to {host} successfully.")
                         break  # Exit the loop upon successful reconnection
                     except Exception as e:
-                        logging.error(f"Reconnection attempt to {peer_identifier} failed: {e}")
+                        logging.error(f"Reconnection attempt to {host} failed: {e}")
                 else:
                     logging.info(f"Already connected to {peer_identifier}. No need to reconnect.")
                     break  # Exit the loop if already reconnected
