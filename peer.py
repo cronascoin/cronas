@@ -178,8 +178,8 @@ class Peer:
 
 
     def calculate_backoff(self, attempt):
-            """Calculate the backoff time in seconds based on the attempt count."""
-            return min(2 ** attempt + random.uniform(0, 1), 60)  # Cap the backoff at 60 seconds
+        """Calculates the backoff time with jitter."""
+        return min(2 ** attempt + random.uniform(0, 1), 60)
 
 
     async def listen_for_messages(self, reader, writer):
@@ -280,17 +280,21 @@ class Peer:
 
     async def connect_to_new_peers(self, new_peers):
         """Attempt to connect to new peers not currently being connected to."""
-        for peer_ip in new_peers:
-            if peer_ip not in self.peers and peer_ip != self.external_ip and peer_ip not in self.connecting_peers:
-                self.peers.add(peer_ip)
-                self.rewrite_peers_file()
-                if peer_ip == self.detect_ip_address():
-                    continue
-                logging.info(f"Attempting to connect to new peer: {peer_ip}")
-                host, port_str = peer_ip.split(":")
-                port = int(port_str)
-                logging.info(f"Attempting to connect to new peer: {peer_ip}")
-                asyncio.create_task(self.connect_to_peer(host, port))
+        for peer_info in new_peers:
+            host = peer_info
+            port = self.p2p_port
+            peer_identifier = f"{host}:{port}"
+
+            # Check if the peer is the node itself or if it's already in the list of active or connecting peers
+            if peer_identifier == f"{self.external_ip}:{self.p2p_port}" or \
+                peer_identifier in self.active_peers or \
+                peer_identifier in self.connecting_peers:
+                logging.info(f"Skipping connection to {peer_identifier}.")
+                continue
+
+            # Now attempt to connect to the peer
+            logging.info(f"Attempting to connect to new peer: {peer_identifier}")
+            asyncio.create_task(self.connect_to_peer(host, port))
 
 
     async def send_heartbeat(self, writer):
@@ -359,7 +363,8 @@ class Peer:
             logging.info(f"Received peer list from {addr}")
             new_peers = message.get("payload", [])
             if new_peers:
-                await self.handle_peer_list(new_peers)
+                logging.info("Processing new peer list...")
+                await self.connect_to_new_peers(new_peers)
             else:
                 logging.warning("Received empty peer list.")
         
