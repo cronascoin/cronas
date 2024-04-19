@@ -110,7 +110,7 @@ class Peer:
             logging.info(f"Cooldown period active for {host}. Skipping attempt.")
             return
 
-        self.retry_attempts[host] = (current_time, attempt_count + 1)
+        self.retry_attempts[host:port] = (current_time, attempt_count + 1)
 
         attempt = 0
         connected = False
