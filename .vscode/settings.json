@@ -4,6 +4,7 @@
         "aiohttp",
         "cooldown",
         "DGRAM",
+        "EADDRINUSE",
         "peername"
     ]
 }
