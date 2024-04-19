@@ -29,13 +29,24 @@ class Peer:
 
 
     async def start_p2p_server(self):
-        self.p2p_server = await asyncio.start_server(
-            self.handle_peer_connection, self.host, self.p2p_port)
-        logging.info(f"P2P server {self.server_id} listening on {self.host}:{self.p2p_port}")
-        async with self.p2p_server:
-            await self.p2p_server.serve_forever()
-
-
+        try:
+            self.p2p_server = await asyncio.start_server(
+                self.handle_peer_connection, self.host, self.p2p_port)
+            logging.info(f"P2P server {self.server_id} listening on {self.host}:{self.p2p_port}")
+            async with self.p2p_server:
+                await self.p2p_server.serve_forever()
+        except OSError as e:
+            if e.errno == 10048:  # Windows specific error code for address already in use
+                logging.error("Port 4333 is already in use. Please ensure the port is free and try again.")
+            elif e.errno == socket.EADDRINUSE:  # Generic error code for address already in use (works across platforms)
+                logging.error("Port 4333 is already in use. Please ensure the port is free and try again.")
+            else:
+                logging.error(f"Failed to start server: {e}")
+                await self.close_p2p_server()
+        except Exception as e:
+            logging.error(f"Error starting P2P server: {e}")
+            await self.close_p2p_server()
+            
     async def handle_peer_connection(self, reader, writer):
         addr = writer.get_extra_info('peername')
         logging.info(f"Connected to peer {addr}")
@@ -151,7 +162,7 @@ class Peer:
                 finally:
                     attempt += 1
                     if not connected and attempt < max(attempt_count + 1, 5):
-                        backoff = self.calculate_backoff(self, attempt)
+                        backoff = self.calculate_backoff(attempt)
                         logging.info(f"Waiting {backoff} seconds before next attempt.")
                         await asyncio.sleep(backoff)
 

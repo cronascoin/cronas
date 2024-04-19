@@ -24,13 +24,6 @@ async def main():
     
     peer = Peer(p2p, p2p_port, seeds)
     rpc_server = RPCServer(peer, rpc, rpc_port)
-    
-    try:
-        # Attempt to start the P2P server
-        await peer.start_p2p_server()
-    except OSError as e:
-        logging.error(f"Failed to start the P2P server on {p2p}:{p2p_port}. The server might already be running.")
-        return  
 
     peer.load_peers()
 
@@ -50,3 +43,5 @@ if __name__ == '__main__':
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("KeyboardInterrupt caught, shutting down.")
+    except Exception:
+        logging.error("Is the server already running?")
