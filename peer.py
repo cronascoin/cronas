@@ -6,6 +6,7 @@ import socket
 import uuid
 import random
 import time
+import aiofiles
 
 
 logging.basicConfig(level=logging.INFO)
@@ -15,7 +16,7 @@ class Peer:
         self.server_id = str(uuid.uuid4())
         self.host = host
         self.p2p_port = p2p_port
-        self.peers = set(seeds if seeds else [])
+        self.peers = set(seeds or [])
         self.seeds = seeds
         self.external_ip = self.detect_ip_address()
         self.load_peers()
@@ -36,9 +37,7 @@ class Peer:
             async with self.p2p_server:
                 await self.p2p_server.serve_forever()
         except OSError as e:
-            if e.errno == 10048:  # Windows specific error code for address already in use
-                logging.error("Port 4333 is already in use. Please ensure the port is free and try again.")
-            elif e.errno == socket.EADDRINUSE:  # Generic error code for address already in use (works across platforms)
+            if e.errno in [10048, socket.EADDRINUSE]:  # Windows specific error code for address already in use
                 logging.error("Port 4333 is already in use. Please ensure the port is free and try again.")
             else:
                 logging.error(f"Failed to start server: {e}")
@@ -95,13 +94,13 @@ class Peer:
         if host in [self.host, self.external_ip, "127.0.0.1"]:
             logging.info("Attempted to connect to self. Skipping.")
             return
-        
+
         self.connecting_peers.add(host)
-        
+
         if host in self.active_peers:
             logging.info(f"Already connected to {host}. Skipping.")
             return
-        
+
         current_time = time.time()
         last_attempt, attempt_count = self.retry_attempts.get(host, (0, 0))
         cooldown = self.calculate_backoff(attempt_count)
@@ -148,14 +147,12 @@ class Peer:
 
                         # Transition into listening for messages without closing the connection.
                         await self.listen_for_messages(reader, writer)
-                        # If listen_for_messages returns, it means the connection was closed.
-                        return
                     else:
                         logging.info(f"Unexpected response from {host}:{port}")
                         writer.close()
                         await writer.wait_closed()
-                        return
-
+                    # If listen_for_messages returns, it means the connection was closed.
+                    return
                 except Exception as e:
                     logging.error(f"Failed to connect or communicate with {host}:{port}: {e}")
 
@@ -204,8 +201,8 @@ class Peer:
             await writer.wait_closed()
 
 
-    async def handle_client(reader, writer, peer):
-        await peer.listen_for_messages(reader, writer)
+    async def handle_client(self, writer, peer):
+        await peer.listen_for_messages(self, writer)
         writer.close()
         await writer.wait_closed()
 
@@ -227,17 +224,16 @@ class Peer:
             return '127.0.0.1'
 
 
-    def rewrite_peers_file(self):
+    async def rewrite_peers_file(self):
         try:
-            with open("peers.dat", "w") as f:
+            async with aiofiles.open("peers.dat", "w") as f:
                 for peer in self.peers:
-                    f.write(f"{peer}\n")
+                    await f.write(f"{peer}\n")
             logging.info("Peers file updated successfully.")
         except IOError as e:
             logging.error(f"Failed to write to peers.dat: {e}")
         except Exception as e:
             logging.error(f"An unexpected error occurred while updating peers.dat: {e}")
-
 
     def load_peers(self):
         if os.path.exists("peers.dat"):
@@ -259,8 +255,7 @@ class Peer:
             logging.info(f"Added new peer: {ip}")
 
 
-    def update_peers(self, new_peers):
-        """Adds new peers to the list and updates the peers file."""
+    async def update_peers(self, new_peers):
         updated = False
         for peer in new_peers:
             if peer not in self.peers and peer != self.external_ip:
@@ -271,7 +266,7 @@ class Peer:
                 logging.info(f"Peer {peer} already in the list.")
         
         if updated:
-            self.rewrite_peers_file()
+            await self.rewrite_peers_file()  # Assuming this is also made async
         logging.info("Peers file updated successfully.")
 
 
@@ -374,13 +369,12 @@ class Peer:
 
         elif message.get("type") == "peer_list":
             logging.info(f"Received peer list from {addr}")
-            new_peers = message.get("payload", [])
-            if new_peers:
-                logging.info("Processing new peer list...")
-                await self.connect_to_new_peers(new_peers)
+            if new_peers := message.get("payload", []):
+                logging.info("Processing and updating with new peer list...")
+                await self.update_peers(new_peers)  # Directly call update_peers here
             else:
                 logging.warning("Received empty peer list.")
-        
+
         elif message.get("type") == "heartbeat_ack":
             logging.info(f"Heartbeat acknowledgment from {addr}")
 

@@ -1,6 +1,7 @@
 {
     "cSpell.words": [
         "addnode",
+        "aiofiles",
         "aiohttp",
         "cooldown",
         "DGRAM",
