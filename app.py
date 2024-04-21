@@ -23,9 +23,8 @@ async def main():
     seeds = ['137.184.80.215']  # Example seed IP
     
     peer = Peer(p2p, p2p_port, seeds)
+    await peer.async_init()  # Ensure asynchronous initialization is called
     rpc_server = RPCServer(peer, rpc, rpc_port)
-
-    peer.load_peers()
 
     try:
         await asyncio.gather(
@@ -37,11 +36,15 @@ async def main():
     except asyncio.CancelledError:
         logging.info("CancelledError caught, shutting down.")
         await shutdown(peer, rpc_server)
+    except KeyboardInterrupt:
+        logging.info("KeyboardInterrupt caught, shutting down.")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred: {e}. Is the server already running?")
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("KeyboardInterrupt caught, shutting down.")
-    except Exception:
-        logging.error("Is the server already running?")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred: {e}. Is the server already running?")

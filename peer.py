@@ -20,7 +20,7 @@ class Peer:
         self.seeds = seeds
         self.external_ip = self.detect_ip_address()
         self.load_peers()
-        self.rewrite_peers_file()
+        #self.rewrite_peers_file()
         self.hello_seq = 0  # Initialize the hello_seq attribute here
         self.reconnect_delay = 5  # seconds
         self.connecting_peers = set()
@@ -28,7 +28,20 @@ class Peer:
         self.retry_attempts = {}  # Map: peer_identifier -> (last_attempt_time, attempt_count)
         self.cooldown_period = 60  # Cooldown period in seconds before retrying a connection
 
+    async def async_init(self):
+        """Asynchronous initialization tasks."""
+        await self.rewrite_peers_file()
+        self.load_peers()
+        
+        # New addition: Connect to loaded peers
+        for peer_address in self.peers:
+            try:
+                host, port = peer_address.split(':')  # This line can raise a ValueError
+                asyncio.create_task(self.connect_to_peer(host, int(port)))
+            except ValueError:
+                logging.error(f"Incorrectly formatted peer address: '{peer_address}'. Expected format is 'host:port'.")
 
+        
     async def start_p2p_server(self):
         try:
             self.p2p_server = await asyncio.start_server(
@@ -37,11 +50,11 @@ class Peer:
             async with self.p2p_server:
                 await self.p2p_server.serve_forever()
         except OSError as e:
-            if e.errno in [10048, socket.EADDRINUSE]:  # Windows specific error code for address already in use
-                logging.error("Port 4333 is already in use. Please ensure the port is free and try again.")
+            if e.errno == socket.EADDRINUSE:  # Error code for address already in use, works across platforms
+                logging.error(f"Port {self.p2p_port} is already in use. Please ensure the port is free and try again.")
             else:
                 logging.error(f"Failed to start server: {e}")
-                await self.close_p2p_server()
+            await self.close_p2p_server()
         except Exception as e:
             logging.error(f"Error starting P2P server: {e}")
             await self.close_p2p_server()
