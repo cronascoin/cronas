@@ -113,10 +113,10 @@ class Peer:
         if host in [self.host, self.external_ip, "127.0.0.1"]:
             return
 
-        if (host, port) in self.active_peers or (host, port) in self.connecting_peers:
+        if host in self.active_peers or host in self.connecting_peers:
             return
 
-        self.connecting_peers.add((host, port))
+        self.connecting_peers.add((host))
 
         attempt = 0
         writer = None
@@ -138,7 +138,7 @@ class Peer:
                 data = await reader.readline()
                 ack_message = json.loads(data.decode())
                 if ack_message["type"] == "ack":
-                    self.active_peers.add((host, port))
+                    self.active_peers.add((host))
                     self.hello_seq = seq
 
                     asyncio.create_task(self.send_heartbeat(writer))
@@ -160,14 +160,14 @@ class Peer:
                     await asyncio.sleep(self.calculate_backoff(attempt))
 
         if attempt == 5:
-            logging.info(f"Max connection attempts reached for {host}:{port}.")
+            logging.info(f"Max connection attempts reached for {host}.")
 
         if writer is not None and not writer.is_closing():
             writer.close()
             await writer.wait_closed()
 
         # Remove from connecting_peers regardless of success or failure
-        self.connecting_peers.remove((host, port))
+        self.connecting_peers.remove(host)
 
 
     def calculate_backoff(self, attempt):
