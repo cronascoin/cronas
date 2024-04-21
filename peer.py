@@ -37,7 +37,7 @@ class Peer:
         for peer_address in self.peers:
             # Directly include the logic to parse the peer address
             if ':' in peer_address:
-                host, port_str = peer_address.split(':')
+                host, port_str = peer_address.split(':', 1)
                 port = int(port_str)
             else:
                 host = peer_address
