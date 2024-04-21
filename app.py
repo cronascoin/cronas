@@ -20,7 +20,7 @@ async def main():
     rpc = '127.0.0.1'
     p2p_port = 4333
     rpc_port = 4334
-    seeds = ['137.184.80.215']  # Example seed IP
+    seeds = ['137.184.80.215:4333']  # Example seed IP
     
     peer = Peer(p2p, p2p_port, seeds)
     await peer.async_init()  # Ensure asynchronous initialization is called

@@ -5,7 +5,6 @@ import os
 import socket
 import uuid
 import random
-import time
 import aiofiles
 
 
@@ -19,8 +18,6 @@ class Peer:
         self.peers = set(seeds or [])
         self.seeds = seeds
         self.external_ip = self.detect_ip_address()
-        self.load_peers()
-        #self.rewrite_peers_file()
         self.hello_seq = 0  # Initialize the hello_seq attribute here
         self.reconnect_delay = 5  # seconds
         self.connecting_peers = set()
@@ -30,16 +27,25 @@ class Peer:
 
     async def async_init(self):
         """Asynchronous initialization tasks."""
-        await self.rewrite_peers_file()
-        self.load_peers()
-        
-        # New addition: Connect to loaded peers
+        await self.load_peers()  # Ensure this method is async if file I/O is involved
+        await self.connect_to_known_peers()  # A new method to handle connections
+
+    async def connect_to_known_peers(self):
+        """Asynchronously attempts to connect to all known peers."""
+        default_port = 4334
+        logging.info(f"Attempting to connect to known peers: {self.peers}")
         for peer_address in self.peers:
-            try:
-                host, port = peer_address.split(':')  # This line can raise a ValueError
-                asyncio.create_task(self.connect_to_peer(host, int(port)))
-            except ValueError:
-                logging.error(f"Incorrectly formatted peer address: '{peer_address}'. Expected format is 'host:port'.")
+            # Directly include the logic to parse the peer address
+            if ':' in peer_address:
+                host, port_str = peer_address.split(':')
+                port = int(port_str)
+            else:
+                host = peer_address
+                port = default_port
+
+            # Now, host and port are defined, proceed with the connection
+            if (host, port) not in self.active_peers and (host, port) not in self.connecting_peers:
+                asyncio.create_task(self.connect_to_peer(host, port))
 
         
     async def start_p2p_server(self):
@@ -105,86 +111,63 @@ class Peer:
 
     async def connect_to_peer(self, host, port):
         if host in [self.host, self.external_ip, "127.0.0.1"]:
-            logging.info("Attempted to connect to self. Skipping.")
             return
 
-        self.connecting_peers.add(host)
-
-        if host in self.active_peers:
-            logging.info(f"Already connected to {host}. Skipping.")
+        if (host, port) in self.active_peers or (host, port) in self.connecting_peers:
             return
 
-        current_time = time.time()
-        last_attempt, attempt_count = self.retry_attempts.get(host, (0, 0))
-        cooldown = self.calculate_backoff(attempt_count)
-
-        if current_time - last_attempt < cooldown:
-            logging.info(f"Cooldown period active for {host}. Skipping attempt.")
-            return
-
-        self.retry_attempts[host] = (current_time, attempt_count + 1)
+        self.connecting_peers.add((host, port))
 
         attempt = 0
-        connected = False
         writer = None
 
-        try:  # This try covers the connection attempts
-            while attempt < max(attempt_count + 1, 5) and not connected:
-                try:
-                    logging.info(f"Attempt {attempt + 1} to connect to {host}:{port}")
-                    reader, writer = await asyncio.open_connection(host, port)
+        while attempt < 5:
+            try:
+                reader, writer = await asyncio.open_connection(host, port)
 
-                    self.hello_seq += 1
-                    handshake_msg = {
-                        "type": "hello",
-                        "payload": f"Hello from {self.host}",
-                        "seq": self.hello_seq,
-                        "server_id": self.server_id
-                    }
-                    writer.write(json.dumps(handshake_msg).encode() + b'\n')
+                seq = self.hello_seq + 1
+                handshake_msg = {
+                    "type": "hello",
+                    "payload": f"Hello from {self.host}",
+                    "seq": seq,
+                    "server_id": self.server_id
+                }
+                writer.write(json.dumps(handshake_msg).encode() + b'\n')
+                await writer.drain()
+
+                data = await reader.readline()
+                ack_message = json.loads(data.decode())
+                if ack_message["type"] == "ack":
+                    self.active_peers.add((host, port))
+                    self.hello_seq = seq
+
+                    asyncio.create_task(self.send_heartbeat(writer))
+                    request_message = {"type": "request_peer_list", "server_id": self.server_id}
+                    writer.write(json.dumps(request_message).encode() + b'\n')
                     await writer.drain()
 
-                    data = await reader.readline()
-                    ack_message = json.loads(data.decode())
-                    if ack_message.get("type") == "ack":
-                        logging.info(f"Handshake acknowledged by {host}:{port}")
-                        logging.info(f"Successfully connected to {host}:{port}")
-                        self.peers.add(host)
-                        self.retry_attempts[host] = (0, 0)  # Reset retry attempts after a successful connection
-                        connected = True
-                        asyncio.create_task(self.send_heartbeat(writer))
-                        request_message = {"type": "request_peer_list", "server_id": self.server_id}
-                        writer.write(json.dumps(request_message).encode() + b'\n')
-                        await writer.drain()
-                        logging.info("Requested peer list.")
+                    await self.listen_for_messages(reader, writer)
+                    
+                    # Mark as successfully connected and exit the loop
+                    break
 
-                        # Transition into listening for messages without closing the connection.
-                        await self.listen_for_messages(reader, writer)
-                    else:
-                        logging.info(f"Unexpected response from {host}:{port}")
-                        writer.close()
-                        await writer.wait_closed()
-                    # If listen_for_messages returns, it means the connection was closed.
-                    return
-                except Exception as e:
-                    logging.error(f"Failed to connect or communicate with {host}:{port}: {e}")
+            except Exception as e:
+                logging.error(f"Failed to connect to {host}:{port}: {e}")
 
-                finally:
-                    attempt += 1
-                    if not connected and attempt < max(attempt_count + 1, 5):
-                        backoff = self.calculate_backoff(attempt)
-                        logging.info(f"Waiting {backoff} seconds before next attempt.")
-                        await asyncio.sleep(backoff)
+            finally:
+                attempt += 1
+                if attempt < 5:
+                    await asyncio.sleep(self.calculate_backoff(attempt))
 
-        finally:  # This finally is now clearly associated with the try block
-            self.connecting_peers.add(host)
-            if writer is not None and not writer.is_closing():
-                writer.close()
-                await writer.wait_closed()
+        if attempt == 5:
+            logging.info(f"Max connection attempts reached for {host}:{port}.")
 
-        if not connected:
-            logging.info(f"Max attempts reached for {host}. Will retry later.")
+        if writer is not None and not writer.is_closing():
+            writer.close()
+            await writer.wait_closed()
 
+        # Remove from connecting_peers regardless of success or failure
+        self.connecting_peers.remove((host, port))
 
 
     def calculate_backoff(self, attempt):
@@ -242,17 +225,21 @@ class Peer:
             async with aiofiles.open("peers.dat", "w") as f:
                 for peer in self.peers:
                     await f.write(f"{peer}\n")
-            logging.info("Peers file updated successfully.")
+            logging.info("Peers file rewritten successfully.")
         except IOError as e:
             logging.error(f"Failed to write to peers.dat: {e}")
         except Exception as e:
             logging.error(f"An unexpected error occurred while updating peers.dat: {e}")
 
-    def load_peers(self):
+    async def load_peers(self):
+        """Loads peers from the peers.dat file and adds a default port if not specified."""
         if os.path.exists("peers.dat"):
-            with open("peers.dat", "r") as f:
-                for line in f:
-                    self.peers.add(line.strip())
+            async with aiofiles.open("peers.dat", "r") as f:
+                async for line in f:
+                    peer = line.strip()
+                    if ":" not in peer:
+                        peer += ":4334"  # Append default port if not specified
+                    self.peers.add(peer)
         logging.info("Peers loaded from file.")
 
 
@@ -426,3 +413,4 @@ class Peer:
                 logging.info(f"Waiting for {delay} seconds before next reconnection attempt to {peer_identifier}.")
                 await asyncio.sleep(delay)
                 attempt += 1
+                
