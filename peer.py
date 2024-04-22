@@ -8,7 +8,6 @@ import uuid
 import random
 import aiofiles
 import traceback
-import time
 
 logging.basicConfig(level=logging.INFO)
 
@@ -32,6 +31,7 @@ class Peer:
 
     async def load_peers(self):
         if os.path.exists("peers.dat"):
+            # Load peers from file
             async with aiofiles.open("peers.dat", "r") as f:
                 peer_count = 0
                 async for line in f:
@@ -286,8 +286,11 @@ class Peer:
         # Directly use peer_info without splitting to handle IP:Port format
         if ":" in peer_info:
             ip = peer_info.split(":")[0]
+            ip = peer_info.split(":")[0]
         else:
             ip = peer_info
+            peer_info += f":{self.p2p_port}"  # Append default port if not specified
+        
             peer_info += f":{self.p2p_port}"  # Append default port if not specified
         
         if ip in [self.host, self.external_ip, "127.0.0.1"]:
