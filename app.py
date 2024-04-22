@@ -7,13 +7,10 @@ logging.basicConfig(level=logging.INFO)
 
 async def shutdown(peer, rpc_server):
     logging.info("Shutting down...")
-    
     await peer.cancel_heartbeat_tasks()  # Ensure heartbeat tasks are cancelled first
     await peer.close_p2p_server()
     await rpc_server.close_rpc_server()
-    
     await cancel_remaining_tasks()  # Cancel any remaining asyncio tasks
-    
     logging.info("Shutdown complete.")
 
 async def cancel_remaining_tasks():
