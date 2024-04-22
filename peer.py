@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -20,8 +21,6 @@ class Peer:
         self.external_ip = self.detect_ip_address()
         self.hello_seq = 0  # Initialize the hello_seq attribute here
         self.reconnect_delay = 5  # seconds
-        self.connecting_peers = set()
-        self.active_peers = set()  # Track active connections
         self.retry_attempts = {}  # Map: peer_identifier -> (last_attempt_time, attempt_count)
         self.cooldown_period = 60  # Cooldown period in seconds before retrying a connection
         self.heartbeat_tasks = []  # Add this line to track heartbeat tasks
@@ -90,7 +89,7 @@ class Peer:
                 port = default_port
 
             # Now, host and port are defined, proceed with the connection
-            if (host, port) not in self.active_peers and (host, port) not in self.connecting_peers:
+            if (host, port) not in self.peers:
                 asyncio.create_task(self.connect_to_peer(host, port))
 
 
@@ -99,7 +98,7 @@ class Peer:
         assert self is not None, "Null pointer exception: self is null"
         assert addr is not None, "Null pointer exception: addr is null"
 
-        self.active_peers.add(addr)
+        self.peers.add(addr)
         logging.info(f"Connected to peer {addr}")
         try:
             data_buffer = ""
@@ -149,10 +148,10 @@ class Peer:
 
         peer_tuple = (host, port)  # Use a tuple for consistency
 
-        if peer_tuple in self.active_peers or peer_tuple in self.connecting_peers:
+        if peer_tuple in self.peers:
             return
 
-        self.connecting_peers.add(peer_tuple)
+        self.peers.add(peer_tuple)
         logging.info(f"Attempting to connect to {host}:{port}")
 
         attempt = 0
@@ -175,7 +174,7 @@ class Peer:
                 data = await reader.readline()
                 ack_message = json.loads(data.decode())
                 if ack_message["type"] == "ack":
-                    self.active_peers.add(peer_tuple)
+                    self.peers.add(peer_tuple)
                     self.hello_seq = seq
 
                     asyncio.create_task(self.send_heartbeat(writer))
@@ -202,7 +201,7 @@ class Peer:
             writer.close()
             await writer.wait_closed()
 
-        self.connecting_peers.remove(peer_tuple)  # Ensure this uses the tuple format
+        self.peers.remove(peer_tuple)  # Ensure this uses the tuple format
 
 
     def calculate_backoff(self, attempt):
@@ -256,27 +255,20 @@ class Peer:
 
 
     async def rewrite_peers_file(self):
-        """Rewrites the peers.dat file, ensuring all entries have a port and are unique."""
+        """Rewrites the peers.dat file, ensuring all entries are in 'host:port' format and unique."""
         try:
+            # Create a set comprehension to ensure uniqueness and proper format
+            # This automatically handles both adding ports where missing and deduplication
+            unique_peers = {f"{peer}:{self.p2p_port}" if ":" not in peer else peer for peer in self.peers}
+
             async with aiofiles.open("peers.dat", "w") as f:
-                unique_peers = {f"{peer}:{self.p2p_port}" if ":" not in peer else peer for peer in self.peers}
-                for peer in self.peers:
-                    # Ensure each peer entry has a port
-                    if ":" not in peer:
-                        peer_with_port = f"{peer}:{self.p2p_port}"
-                    else:
-                        peer_with_port = peer
-                    # Add the formatted peer to the set of unique peers
-                    unique_peers.add(peer_with_port)
-                
-                # Write each unique peer to the file
+                # Write each unique, properly formatted peer to the file
                 for peer in unique_peers:
                     await f.write(f"{peer}\n")
-                    
+
             logging.info("Peers file rewritten successfully, with duplicates removed.")
         except IOError as e:
             logging.error(f"Failed to write to peers.dat: {e}")
-
         except Exception as e:
             logging.error(f"An unexpected error occurred while updating peers.dat: {e}\n{traceback.format_exc()}")
 
@@ -321,15 +313,14 @@ class Peer:
 
             # Check if the peer is the node itself or if it's already in the list of active or connecting peers
             if host == self.external_ip or \
-                host in self.active_peers or \
-                host in self.connecting_peers:
+                host in self.peers:
     
                 logging.info(f"Skipping connection to {host}.")
                 continue
 
             # Now attempt to connect to the peer
             logging.info(f"Attempting to connect to new peer: {host}")
-            self.connecting_peers.add(host)
+            self.peers.add(host)
             asyncio.create_task(self.connect_to_peer(host, port))
 
 
@@ -374,7 +365,8 @@ class Peer:
             logging.info("Processing new peer list...")
             new_peers = set(peer_data) - self.peers - {self.external_ip}
             self.update_peers(new_peers)
-            
+            logging.info(f"New peer added: {new_peers}")
+            asyncio.create_task(self.rewrite_peers_file())
             # Optionally, if you want to immediately attempt to connect to these new peers:
             await self.connect_to_new_peers(new_peers)
         except Exception as e:
@@ -444,11 +436,11 @@ class Peer:
         max_attempts = 5  # Define a maximum number of reconnection attempts
 
         while attempt < max_attempts:
-            if (host, port) not in self.active_peers:  # Assuming active_peers stores (host, port) tuples
+            if (host, port) not in self.peers:  # Assuming active_peers stores (host, port) tuples
                 try:
                     await self.connect_to_peer(host, port)
                     logging.info(f"Reconnected to {host} successfully.")
-                    self.active_peers.add((host, port))  # Update active_peers appropriately
+                    self.peers.add((host, port))  # Update active_peers appropriately
                     break
                 except Exception as e:
                     logging.error(f"Reconnection attempt to {host} failed: {e}")
@@ -470,9 +462,7 @@ class Peer:
         """Cancels all heartbeat tasks."""
         for task in self.heartbeat_tasks:
             task.cancel()  # Request cancellation of the task
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task  # Wait for the task to be cancelled
-            except asyncio.CancelledError:
-                pass  # Expected, as we requested cancellation
         self.heartbeat_tasks.clear()  # Clear the list of tasks after cancellation
         logging.info("All heartbeat tasks cancelled.")
