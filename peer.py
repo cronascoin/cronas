@@ -23,7 +23,8 @@ class Peer:
         self.active_peers = set()  # Track active connections
         self.retry_attempts = {}  # Map: peer_identifier -> (last_attempt_time, attempt_count)
         self.cooldown_period = 60  # Cooldown period in seconds before retrying a connection
-
+        self.heartbeat_tasks = []  # Add this line to track heartbeat tasks
+ 
 
     async def async_init(self):
         """Asynchronous initialization tasks."""
@@ -258,21 +259,28 @@ class Peer:
 
 
     async def rewrite_peers_file(self):
-            try:
-                async with aiofiles.open("peers.dat", "w") as f:
-                    # Check if peers are stored as dictionaries with 'host' keys
-                    if all(isinstance(peer, dict) and 'host' in peer for peer in self.peers):
-                        ip_addresses = [peer['host'] for peer in self.peers]
-                        for ip in ip_addresses:
-                            await f.write(f"{ip}\n")
-                    else:  # Fallback to writing peers directly if not in expected format
-                        for peer in self.peers:
-                            await f.write(f"{peer}\n")
-                logging.info("Peers file rewritten successfully.")
-            except IOError as e:
-                logging.error(f"Failed to write to peers.dat: {e}")
-            except Exception as e:
-                logging.error(f"An unexpected error occurred while updating peers.dat: {e}")
+        """Rewrites the peers.dat file, ensuring all entries have a port and are unique."""
+        try:
+            async with aiofiles.open("peers.dat", "w") as f:
+                unique_peers = set()  # Use a set to automatically avoid duplicates
+                for peer in self.peers:
+                    # Ensure each peer entry has a port
+                    if ":" not in peer:
+                        peer_with_port = f"{peer}:{self.p2p_port}"
+                    else:
+                        peer_with_port = peer
+                    # Add the formatted peer to the set of unique peers
+                    unique_peers.add(peer_with_port)
+                
+                # Write each unique peer to the file
+                for peer in unique_peers:
+                    await f.write(f"{peer}\n")
+                    
+            logging.info("Peers file rewritten successfully, with duplicates removed.")
+        except IOError as e:
+            logging.error(f"Failed to write to peers.dat: {e}")
+        except Exception as e:
+            logging.error(f"An unexpected error occurred while updating peers.dat: {e}")
 
 
     async def add_peer(self, peer_info):
@@ -301,15 +309,10 @@ class Peer:
                 self.peers.add(peer)
                 logging.info(f"Peer {peer} added to the list.")
                 updated = True
-                await self.rewrite_peers_file()
-            # Removed the else clause to reduce verbose logging
-        
+        # Call rewrite_peers_file only once if there were any updates
         if updated:
-            try:
-                await self.rewrite_peers_file()  # Assuming this is also made async
-                logging.info("Peers file updated successfully.")  # Moved inside if block
-            except Exception as e:
-                logging.error(f"Failed to update peers file: {e}")
+            await self.rewrite_peers_file()
+            logging.info("Peers file updated successfully.")
 
 
     async def connect_to_new_peers(self, new_peers):
@@ -361,6 +364,10 @@ class Peer:
             logging.info("Closing heartbeat messages.")
         except Exception as e:
             logging.error(f"Error sending heartbeat: {e}")
+
+            # Example of starting a heartbeat task and tracking it
+            task = asyncio.create_task(self.send_heartbeat(writer))
+            self.heartbeat_tasks.append(task)  # Track the task
 
 
     async def handle_peer_list(self, peer_data):
@@ -457,3 +464,13 @@ class Peer:
                 await asyncio.sleep(delay)
                 attempt += 1
                 
+    async def cancel_heartbeat_tasks(self):
+        """Cancels all heartbeat tasks."""
+        for task in self.heartbeat_tasks:
+            task.cancel()  # Request cancellation of the task
+            try:
+                await task  # Wait for the task to be cancelled
+            except asyncio.CancelledError:
+                pass  # Expected, as we requested cancellation
+        self.heartbeat_tasks.clear()  # Clear the list of tasks after cancellation
+        logging.info("All heartbeat tasks cancelled.")

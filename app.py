@@ -7,9 +7,23 @@ logging.basicConfig(level=logging.INFO)
 
 async def shutdown(peer, rpc_server):
     logging.info("Shutting down...")
+    
+    await peer.cancel_heartbeat_tasks()  # Ensure heartbeat tasks are cancelled first
     await peer.close_p2p_server()
     await rpc_server.close_rpc_server()
+    
+    await cancel_remaining_tasks()  # Cancel any remaining asyncio tasks
+    
     logging.info("Shutdown complete.")
+
+async def cancel_remaining_tasks():
+    for task in asyncio.all_tasks():
+        if task is not asyncio.current_task():
+            task.cancel()
+            try:
+                await task  # Await task to allow it to cancel gracefully
+            except asyncio.CancelledError:
+                pass  # Task cancellation is expected
 
 async def main():
     p2p_host = '0.0.0.0'
@@ -43,4 +57,14 @@ async def main():
         logging.error(f"An unexpected error occurred: {e}")
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("KeyboardInterrupt caught. Attempting to shut down gracefully.")
+        # This needs to create a new event loop because asyncio.run closes the loop on exit
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(shutdown(peer, rpc_server))
+        loop.close()
+    except Exception as e:
+        logging.error(f"An unexpected error occurred: {e}")
