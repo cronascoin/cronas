@@ -439,30 +439,34 @@ class Peer:
 
 
     async def reconnect_to_peer(self, host, port):
-            """
-            Attempt to reconnect to a peer with an exponential backoff strategy.
-            """
-            peer_identifier = f"{host}:{port}"
-            logging.info(f"Attempting to reconnect to {peer_identifier}")
+        peer_identifier = f"{host}:{port}"
+        logging.info(f"Attempting to reconnect to {peer_identifier}")
 
-            attempt = 0
-            while True:
-                if host not in self.active_peers:
-                    try:
-                        await self.connect_to_peer(host, port)
-                        logging.info(f"Reconnected to {host} successfully.")
-                        break  # Exit the loop upon successful reconnection
-                    except Exception as e:
-                        logging.error(f"Reconnection attempt to {host} failed: {e}")
-                else:
-                    logging.info(f"Already connected to {peer_identifier}. No need to reconnect.")
-                    break  # Exit the loop if already reconnected
+        attempt = 0
+        max_attempts = 5  # Define a maximum number of reconnection attempts
 
-                # Calculate the delay for the next reconnection attempt using exponential backoff
-                delay = self.calculate_backoff(attempt)
-                logging.info(f"Waiting for {delay} seconds before next reconnection attempt to {peer_identifier}.")
-                await asyncio.sleep(delay)
-                attempt += 1
+        while attempt < max_attempts:
+            if (host, port) not in self.active_peers:  # Assuming active_peers stores (host, port) tuples
+                try:
+                    await self.connect_to_peer(host, port)
+                    logging.info(f"Reconnected to {host} successfully.")
+                    self.active_peers.add((host, port))  # Update active_peers appropriately
+                    break
+                except Exception as e:
+                    logging.error(f"Reconnection attempt to {host} failed: {e}")
+            else:
+                logging.info(f"Already connected to {peer_identifier}. No need to reconnect.")
+                break
+
+            delay = self.calculate_backoff(attempt)
+            await asyncio.sleep(delay)
+            logging.info(f"Waiting for {delay} seconds before next reconnection attempt to {peer_identifier}.")
+            await asyncio.sleep(delay)
+            attempt += 1
+
+        if attempt == max_attempts:
+            logging.info(f"Max reconnection attempts reached for {peer_identifier}.")
+
                 
     async def cancel_heartbeat_tasks(self):
         """Cancels all heartbeat tasks."""
