@@ -30,19 +30,20 @@ class Peer:
         await self.load_peers()
 
     async def load_peers(self):
-        """Loads peers from the peers.dat file, or initializes from seeds if not present."""
         if os.path.exists("peers.dat"):
-            # Load peers from file
             async with aiofiles.open("peers.dat", "r") as f:
+                peer_count = 0
                 async for line in f:
-                    peer = line.strip()
-                    self.peers.add(peer)
+                    self.peers.add(line.strip())
+                    peer_count += 1
+            logging.info(f"Loaded {peer_count} peers from file.")
         else:
-            # Initialize peers from seeds and save to file
+            # Initial seeding and save
             for seed in self.seeds:
-                self.peers.add(seed)
-            await self.rewrite_peers_file()  # Save seeds to peers.dat
-        logging.info("Peers loaded from file or initialized from seeds.")
+                peer_info = f"{seed}:{self.p2p_port}" if ":" not in seed else seed
+                self.peers.add(peer_info)
+            await self.rewrite_peers_file()
+            logging.info(f"Initialized peers from {len(self.seeds)} seeds and saved to file.")
 
 
     async def start_p2p_server(self):
@@ -95,11 +96,17 @@ class Peer:
 
     async def handle_peer_connection(self, reader, writer):
         addr = writer.get_extra_info('peername')
-        assert self is not None, "Null pointer exception: self is null"
-        assert addr is not None, "Null pointer exception: addr is null"
+        # It's important to define addr before it's used to construct peer_info
+        peer_info = f"{addr[0]}:{addr[1]}"
 
-        self.peers.add(addr)
-        logging.info(f"Connected to peer {addr}")
+        # Adding a peer to the set and updating peers.dat if it's a new connection
+        if peer_info not in self.peers:
+            self.peers.add(peer_info)
+            await self.rewrite_peers_file()  # Asynchronously update peers.dat with the new peer
+            logging.info(f"New peer connected and added: {peer_info}")
+        else:
+            logging.info(f"Connected to existing peer {peer_info}")
+
         try:
             data_buffer = ""
             while True:
@@ -118,14 +125,12 @@ class Peer:
                     message, data_buffer = data_buffer.split('\n', 1)
                     if message:
                         await self.process_message(json.loads(message), writer)
-                    # Do not break after processing; wait for more messages
+                        # Do not break after processing; wait for more messages
 
-        except AssertionError as e:
-            logging.error(f"Fatal error during P2P communication with {addr}: {e}")
         except Exception as e:
-            logging.error(f"Error during P2P communication with {addr}: {e}")
+            logging.error(f"Error during P2P communication with {peer_info}: {e}")
         finally:
-            logging.info(f"Closing connection with {addr}")
+            logging.info(f"Closing connection with {peer_info}")
             writer.close()
             await writer.wait_closed()
 
@@ -143,6 +148,7 @@ class Peer:
 
 
     async def connect_to_peer(self, host, port):
+        peer_info = f"{host}:{port}"
         if host in [self.host, self.external_ip, "127.0.0.1"]:
             return
 
@@ -151,7 +157,6 @@ class Peer:
         if peer_tuple in self.peers:
             return
 
-        self.peers.add(peer_tuple)
         logging.info(f"Attempting to connect to {host}:{port}")
 
         attempt = 0
@@ -174,7 +179,8 @@ class Peer:
                 data = await reader.readline()
                 ack_message = json.loads(data.decode())
                 if ack_message["type"] == "ack":
-                    self.peers.add(peer_tuple)
+                    self.peers.add(peer_info)  # Add peer in string format
+                    await self.rewrite_peers_file()  # Update peers.dat accordingly
                     self.hello_seq = seq
 
                     asyncio.create_task(self.send_heartbeat(writer))
