@@ -8,6 +8,7 @@ import uuid
 import random
 import aiofiles
 import traceback
+import time
 
 logging.basicConfig(level=logging.INFO)
 
@@ -16,15 +17,15 @@ class Peer:
         self.server_id = str(uuid.uuid4())
         self.host = host
         self.p2p_port = p2p_port
-        self.peers = set(seeds or [])
-        self.seeds = seeds
+        self.peers = {}
+        self.seeds = seeds or []
         self.external_ip = self.detect_ip_address()
         self.hello_seq = 0  # Initialize the hello_seq attribute here
         self.reconnect_delay = 5  # seconds
         self.retry_attempts = {}  # Map: peer_identifier -> (last_attempt_time, attempt_count)
         self.cooldown_period = 60  # Cooldown period in seconds before retrying a connection
         self.heartbeat_tasks = []  # Add this line to track heartbeat tasks
- 
+
 
     async def async_init(self):
         await self.load_peers()
@@ -34,16 +35,20 @@ class Peer:
             async with aiofiles.open("peers.dat", "r") as f:
                 peer_count = 0
                 async for line in f:
-                    self.peers.add(line.strip())
+                    parts = line.strip().split(':')
+                    ip = parts[0]
+                    if len(parts) >= 2:
+                        last_seen = parts[1]
+                        # If the last_seen part is an integer, use it; otherwise, set it to None
+                        last_seen = int(last_seen) if last_seen.isdigit() else None
+                    else:
+                        last_seen = None
+
+                    self.peers[ip] = last_seen
                     peer_count += 1
             logging.info(f"Loaded {peer_count} peers from file.")
         else:
-            # Initial seeding and save
-            for seed in self.seeds:
-                peer_info = f"{seed}:{self.p2p_port}" if ":" not in seed else seed
-                self.peers.add(peer_info)
-            await self.rewrite_peers_file()
-            logging.info(f"Initialized peers from {len(self.seeds)} seeds and saved to file.")
+            await self.add_new_peers(self.seeds)
 
 
     async def start_p2p_server(self):
@@ -77,21 +82,18 @@ class Peer:
 
 
     async def connect_to_known_peers(self):
-        """Asynchronously attempts to connect to all known peers."""
-        default_port = self.p2p_port
-        logging.info(f"Attempting to connect to known peers: {self.peers}")
-        for peer_address in self.peers:
-            # Directly include the logic to parse the peer address
-            if ':' in peer_address:
-                host, port_str = peer_address.split(':', 1)
-                port = int(port_str)
-            else:
-                host = peer_address
-                port = default_port
+        """Asynchronously attempts to connect to all known peers using the default p2p_port, avoiding self-connection."""
+        logging.info(f"Attempting to connect to known peers: {list(self.peers.keys())}")
+        for peer_address in self.peers.keys():
+            host = peer_address.split(':')[0]  # Extract only the host part
 
-            # Now, host and port are defined, proceed with the connection
-            if (host, port) not in self.peers:
-                asyncio.create_task(self.connect_to_peer(host, port))
+            # Prevent connecting to itself by comparing the host and port
+            if host in [self.host, self.external_ip, "127.0.0.1"] or self.p2p_port == self.p2p_port:
+                logging.info(f"Skipping connection to self: {host}")
+                continue
+
+            # Proceed with the connection attempt using the default P2P port
+            asyncio.create_task(self.connect_to_peer(host, self.p2p_port))
 
 
     async def handle_peer_connection(self, reader, writer):
@@ -101,7 +103,7 @@ class Peer:
 
         # Adding a peer to the set and updating peers.dat if it's a new connection
         if peer_info not in self.peers:
-            self.peers.add(peer_info)
+            self.peers[peer_info] = int(time.time())
             await self.rewrite_peers_file()  # Asynchronously update peers.dat with the new peer
             logging.info(f"New peer connected and added: {peer_info}")
         else:
@@ -179,7 +181,7 @@ class Peer:
                 data = await reader.readline()
                 ack_message = json.loads(data.decode())
                 if ack_message["type"] == "ack":
-                    self.peers.add(peer_info)  # Add peer in string format
+                    self.peers[peer_info] = None   # Add peer in string format
                     await self.rewrite_peers_file()  # Update peers.dat accordingly
                     self.hello_seq = seq
 
@@ -258,25 +260,26 @@ class Peer:
         except Exception as e:
             logging.info(f"Failed to detect external IP address: {e}")
             return '127.0.0.1'
-
+        
+    async def add_new_peers(self, new_peers):
+        updated = False
+        for ip in new_peers:
+            if ip not in self.peers and ip != self.external_ip:
+                self.peers[ip] = None  # No last seen time yet
+                logging.info(f"New peer {ip} added to the list.")
+                updated = True
+        if updated:
+            await self.rewrite_peers_file()
 
     async def rewrite_peers_file(self):
-        """Rewrites the peers.dat file, ensuring all entries are in 'host:port' format and unique."""
         try:
-            # Create a set comprehension to ensure uniqueness and proper format
-            # This automatically handles both adding ports where missing and deduplication
-            unique_peers = {f"{peer}:{self.p2p_port}" if ":" not in peer else peer for peer in self.peers}
-
-            async with aiofiles.open("peers.dat", "w") as f:
-                # Write each unique, properly formatted peer to the file
-                for peer in unique_peers:
-                    await f.write(f"{peer}\n")
-
-            logging.info("Peers file rewritten successfully, with duplicates removed.")
-        except IOError as e:
-            logging.error(f"Failed to write to peers.dat: {e}")
+            async with aiofiles.open("peers.dat", "w", exist_ok=True) as f:
+                for ip, last_seen in self.peers.items():
+                    last_seen_str = str(last_seen) if last_seen is not None else 'None'
+                    await f.write(f"{ip}:{last_seen_str}\n")
+            logging.info("Peers file rewritten successfully.")
         except Exception as e:
-            logging.error(f"An unexpected error occurred while updating peers.dat: {e}\n{traceback.format_exc()}")
+            logging.error(f"Failed to rewrite peers.dat: {e}\n{traceback.format_exc()}")
 
 
     async def add_peer(self, peer_info):
@@ -293,22 +296,21 @@ class Peer:
         
         # Check if peer_info (which could contain ports) is not already in self.peers
         if peer_info not in self.peers:
-            self.peers.add(peer_info)
+            self.peers[peer_info] = None 
             await self.rewrite_peers_file()  # Ensure this call is awaited
             logging.info(f"Added new peer: {peer_info}")
 
-
     async def update_peers(self, new_peers):
-        updated = False
+        # This method now only updates last seen times for peers that have been connected to
         for peer in new_peers:
-            if peer not in self.peers and peer != self.external_ip:
-                self.peers.add(peer)
-                logging.info(f"Peer {peer} added to the list.")
-                updated = True
-        # Call rewrite_peers_file only once if there were any updates
-        if updated:
+            self.update_peer_last_seen(peer)
+
+
+    async def update_peer_last_seen(self, ip):
+        if ip in self.peers:
+            self.peers[ip] = int(time.time())
+            logging.info(f"Peer {ip}'s last seen time updated.")
             await self.rewrite_peers_file()
-            logging.info("Peers file updated successfully.")
 
 
     async def connect_to_new_peers(self, new_peers):
@@ -326,7 +328,7 @@ class Peer:
 
             # Now attempt to connect to the peer
             logging.info(f"Attempting to connect to new peer: {host}")
-            self.peers.add(host)
+            self.peers[peer_info] = None 
             asyncio.create_task(self.connect_to_peer(host, port))
 
 
@@ -366,17 +368,26 @@ class Peer:
 
 
     async def handle_peer_list(self, peer_data):
-        """Processes received peer list and updates internal data structures."""
-        try:
-            logging.info("Processing new peer list...")
-            new_peers = set(peer_data) - self.peers - {self.external_ip}
-            self.update_peers(new_peers)
-            logging.info(f"New peer added: {new_peers}")
-            asyncio.create_task(self.rewrite_peers_file())
-            # Optionally, if you want to immediately attempt to connect to these new peers:
-            await self.connect_to_new_peers(new_peers)
-        except Exception as e:
-            logging.error(f"Error in handle_peer_list: {e}")
+        """Processes received peer list, removing port info and updating internal data structures."""
+        logging.info("Processing new peer list...")
+        
+        # Extract and process each peer in the received list
+        for peer_info in peer_data:
+            # Extract the IP address, discarding the port
+            ip = peer_info.split(':')[0]
+            
+            # Update or add the peer with last seen time if it's a new connection
+            if ip not in self.peers:
+                logging.info(f"Adding new peer: {ip}")
+                self.peers[ip] = None  # Newly discovered peer, last seen is None initially
+            else:
+                # Optionally update the last seen time for known peers here, if relevant
+                logging.info(f"Peer {ip} already known, potentially updating last seen time.")
+                # self.peers[ip] = int(time.time())  # Uncomment to update last seen time for existing peers
+            
+        # After processing the peer list, rewrite the peers file with updated information
+        await self.rewrite_peers_file()
+        logging.info("Peer list processed and peers file updated.")
 
 
     async def process_message(self, message, writer):
@@ -446,7 +457,7 @@ class Peer:
                 try:
                     await self.connect_to_peer(host, port)
                     logging.info(f"Reconnected to {host} successfully.")
-                    self.peers.add((host, port))  # Update active_peers appropriately
+                    self.peers[host] = int(time.time())   # Update active_peers appropriately
                     break
                 except Exception as e:
                     logging.error(f"Reconnection attempt to {host} failed: {e}")
