@@ -57,14 +57,4 @@ async def main():
         logging.error(f"An unexpected error occurred: {e}")
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("KeyboardInterrupt caught. Attempting to shut down gracefully.")
-        # This needs to create a new event loop because asyncio.run closes the loop on exit
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(shutdown(peer, rpc_server))
-        loop.close()
-    except Exception as e:
-        logging.error(f"An unexpected error occurred: {e}")
+    asyncio.run(main())

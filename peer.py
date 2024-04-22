@@ -6,6 +6,7 @@ import socket
 import uuid
 import random
 import aiofiles
+import traceback
 
 logging.basicConfig(level=logging.INFO)
 
@@ -27,24 +28,22 @@ class Peer:
  
 
     async def async_init(self):
-        """Asynchronous initialization tasks."""
-        await self.load_peers()  # Ensure this method is async if file I/O is involved
-        await self.connect_to_known_peers()  # A new method to handle connections
-
+        await self.load_peers()
 
     async def load_peers(self):
-        """Loads peers from the peers.dat file and adds a default port if not specified."""
+        """Loads peers from the peers.dat file, or initializes from seeds if not present."""
         if os.path.exists("peers.dat"):
-            try:
-                async with aiofiles.open("peers.dat", "r") as f:
-                    async for line in f:
-                        peer = line.strip()
-                        if ":" not in peer:
-                            peer += f":{self.p2p_port}"  # Append default port if not specified
-                        self.peers.add(peer)
-                logging.info("Peers loaded from file.")
-            except Exception as e:
-                logging.error(f"An error occurred while loading peers from file: {e}")
+            # Load peers from file
+            async with aiofiles.open("peers.dat", "r") as f:
+                async for line in f:
+                    peer = line.strip()
+                    self.peers.add(peer)
+        else:
+            # Initialize peers from seeds and save to file
+            for seed in self.seeds:
+                self.peers.add(seed)
+            await self.rewrite_peers_file()  # Save seeds to peers.dat
+        logging.info("Peers loaded from file or initialized from seeds.")
 
 
     async def start_p2p_server(self):
@@ -133,11 +132,9 @@ class Peer:
 
 
     async def send_peer_list(self, writer):
-        # Extract just the IP addresses from each peer's information
-        ip_addresses = [peer['host'] for peer in self.peers]
         peer_list_message = {
             "type": "peer_list",
-            "payload": ip_addresses,
+            "payload": list(self.peers),
             "server_id": self.server_id,
         }
         writer.write(json.dumps(peer_list_message).encode() + b'\n')
@@ -262,7 +259,7 @@ class Peer:
         """Rewrites the peers.dat file, ensuring all entries have a port and are unique."""
         try:
             async with aiofiles.open("peers.dat", "w") as f:
-                unique_peers = set()  # Use a set to automatically avoid duplicates
+                unique_peers = {f"{peer}:{self.p2p_port}" if ":" not in peer else peer for peer in self.peers}
                 for peer in self.peers:
                     # Ensure each peer entry has a port
                     if ":" not in peer:
@@ -279,8 +276,9 @@ class Peer:
             logging.info("Peers file rewritten successfully, with duplicates removed.")
         except IOError as e:
             logging.error(f"Failed to write to peers.dat: {e}")
+
         except Exception as e:
-            logging.error(f"An unexpected error occurred while updating peers.dat: {e}")
+            logging.error(f"An unexpected error occurred while updating peers.dat: {e}\n{traceback.format_exc()}")
 
 
     async def add_peer(self, peer_info):
