@@ -45,8 +45,11 @@ class Peer:
         if os.path.exists("peers.dat"):
             async with aiofiles.open("peers.dat", "r") as f:
                 async for line in f:
-                    peer, last_seen_str = line.strip().split(":")
-                    self.peers[peer] = int(last_seen_str)  # Convert to int
+                    try: 
+                        peer, last_seen_str = line.strip().split(":")
+                        self.peers[peer] = int(last_seen_str)  # Convert to int
+                    except ValueError:
+                        logging.error(f"Invalid peer entry in peers.dat: {line.strip()}")
         else:
             # Initialize peers from seeds and save to file
             for seed in self.seeds:
