@@ -34,14 +34,6 @@ class Peer:
 
     async def load_peers(self):
         """Loads peers from the peers.dat file, or initializes from seeds if not present."""
-        """
-        if os.path.exists("peers.dat"):
-            # Load peers from file
-            async with aiofiles.open("peers.dat", "r") as f:
-                async for line in f:
-                    peer = line.strip()
-                    self.peers.add(peer)
-        """
         if os.path.exists("peers.dat"):
             async with aiofiles.open("peers.dat", "r") as f:
                 async for line in f:
@@ -53,7 +45,6 @@ class Peer:
         else:
             # Initialize peers from seeds and save to file
             for seed in self.seeds:
-                #self.peers.add(seed)
                 self.peers[seed] = int(time.time()) 
             await self.rewrite_peers_file()  # Save seeds to peers.dat
         logging.info("Peers loaded from file or initialized from seeds.")
@@ -306,7 +297,7 @@ class Peer:
         
         # Check if peer_info (which could contain ports) is not already in self.peers
         if peer_info not in self.peers:
-            self.peers.add(peer_info)
+            self.peers[peer_info] = None  # Add to the dictionary
             await self.rewrite_peers_file()  # Ensure this call is awaited
             logging.info(f"Added new peer: {peer_info}")
 
@@ -315,13 +306,13 @@ class Peer:
         updated = False
         for peer in new_peers:
             if peer not in self.peers and peer != self.external_ip:
-                self.peers.add(peer)
+                self.peers[peer] = None 
                 logging.info(f"Peer {peer} added to the list.")
                 updated = True
-        # Call rewrite_peers_file only once if there were any updates
         if updated:
             await self.rewrite_peers_file()
             logging.info("Peers file updated successfully.")
+
 
 
     async def connect_to_new_peers(self, new_peers):
