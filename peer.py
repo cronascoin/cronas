@@ -149,6 +149,7 @@ class Peer:
 
         logging.info(f"Attempting to connect to {host}:{port}")
 
+        writer = None  # Initialize writer as None
         attempt = 0
         while attempt < 5:
             try:
@@ -180,8 +181,8 @@ class Peer:
                     logging.info(f"Successfully connected to {host}:{port}")
                     break
 
-            except Exception:
-                pass
+            except Exception as e:
+                logging.error(f"Failed to connect to {host}:{port}. Error: {e}")
 
             finally:
                 attempt += 1
@@ -191,7 +192,7 @@ class Peer:
         if attempt == 5:
             logging.info(f"Max connection attempts reached for {host}:{port}.")
 
-        if not writer.is_closing():
+        if writer and not writer.is_closing():  # Check if writer is initialized and not already closing
             writer.close()
             await writer.wait_closed()
 
