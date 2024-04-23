@@ -17,8 +17,8 @@ class Peer:
         self.server_id = str(uuid.uuid4())
         self.host = host
         self.p2p_port = p2p_port
-        #self.peers = set(seeds or [])
         self.peers = {}  # Initialize as a dictionary
+        self.active_peers = set()  # Initialize active_peers
         self.seeds = seeds
         self.external_ip = self.detect_ip_address()
         self.hello_seq = 0  # Initialize the hello_seq attribute here
@@ -89,38 +89,45 @@ class Peer:
 
     async def handle_peer_connection(self, reader, writer):
         addr = writer.get_extra_info('peername')
-        assert self is not None, "Null pointer exception: self is null"
-        assert addr is not None, "Null pointer exception: addr is null"
+        assert self is not None, "Null pointer exception: self is null"  # Debugging assertion
+        assert addr is not None, "Null pointer exception: addr is null"  # Debugging assertion
 
-        self.active_peers.add(addr)
+        self.active_peers.add(addr)  # Assuming you have initialized self.active_peers as a set 
         logging.info(f"Connected to peer {addr}")
+
         try:
             data_buffer = ""
             while True:
-                data = await reader.read(1024)
-                if not data:
-                    if reader.at_eof():
-                        logging.info("Peer disconnected gracefully. Exiting listen loop.")
-                        break  # Only break if peer disconnected gracefully
-                    else:
-                        logging.info("No data received. Waiting for more data...")
-                        await asyncio.sleep(1)
-                        continue
+                try:
+                    data = await reader.read(1024)
+                    if not data:
+                        if reader.at_eof():
+                            logging.info("Peer disconnected gracefully. Exiting listen loop.")
+                            break  
+                        else:
+                            logging.info("No data received. Waiting for more data...")
+                            await asyncio.sleep(1)
+                            continue
 
-                data_buffer += data.decode()
-                while '\n' in data_buffer:
-                    message, data_buffer = data_buffer.split('\n', 1)
-                    if message:
-                        logging.info(f"Received message from {addr}: {message}")
-                        await self.process_message(json.loads(message), writer)
-                        # Do not break after processing; wait for more messages
+                    data_buffer += data.decode()
+                    while '\n' in data_buffer:
+                        message, data_buffer = data_buffer.split('\n', 1)
+                        if message:
+                            logging.info(f"Received message from {addr}: {message}")
+                            await self.process_message(json.loads(message), writer)
+
+                except asyncio.CancelledError:
+                    logging.info(f"Connection task with {addr} cancelled (likely due to shutdown)")
+                    break  # Exit the while loop if shutdown is in progress
 
         except Exception as e:
             logging.error(f"Error during P2P communication with {addr}: {e}")
+
         finally:
             logging.info(f"Closing connection with {addr}")
+            self.active_peers.remove(addr)  # Remove the peer from active_peers
             writer.close()
-            await writer.wait_closed()
+            await writer.wait_closed() 
 
 
     async def send_peer_list(self, writer):
