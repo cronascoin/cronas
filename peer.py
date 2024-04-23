@@ -34,29 +34,33 @@ class Peer:
 
     async def load_peers(self):
         """Loads peers from the peers.dat file, focusing on IP addresses without ports."""
-        if os.path.exists("peers.dat"):
-            # Load peers from file
-            async with aiofiles.open("peers.dat", "r") as f:
-                peer_count = 0
-                async for line in f:
-                    parts = line.strip().split(',')
-                    if len(parts) == 2:
-                        ip, last_seen_str = parts
-                        last_seen = None if last_seen_str == 'None' else int(last_seen_str)
-                        self.peers[ip] = last_seen
-                    elif len(parts) == 1:
-                        # If there's only one part, it's an IP without last_seen time
-                        ip = parts[0]
-                        if ip not in self.peers:  # Check to avoid overwriting existing entries
-                            self.peers[ip] = None
-                    else:
-                        logging.warning(f"Skipping malformed line: {line.strip()}")
-        else:
-            # Initialize peers from seeds (here assuming seeds are just IPs)
-            for seed in self.seeds:
-                self.peers[seed] = None
-            await self.rewrite_peers_file()
-        logging.info("Peers loaded from file or initialized from seeds.")
+        try:
+            if os.path.exists("peers.dat"):
+                # Load peers from file
+                async with aiofiles.open("peers.dat", "r") as f:
+                    for line in f:
+                        parts = line.strip().split(',')
+                        if len(parts) == 2:
+                            ip, last_seen_str = parts
+                            # Convert last_seen_str to int if not 'None', otherwise set to None
+                            last_seen = int(last_seen_str) if last_seen_str != 'None' else None
+                            self.peers[ip] = last_seen
+                        elif len(parts) == 1:
+                            # If there's only one part, it's an IP without last_seen time
+                            ip = parts[0]
+                            if ip not in self.peers:  # Check to avoid overwriting existing entries
+                                self.peers[ip] = None
+                        else:
+                            logging.warning(f"Skipping malformed line: {line.strip()}")
+            else:
+                # Initialize peers from seeds (here assuming seeds are just IPs)
+                for seed in self.seeds:
+                    self.peers[seed] = None
+                await self.rewrite_peers_file()
+
+            logging.info("Peers loaded from file or initialized from seeds.")
+        except Exception as e:
+            logging.error(f"Error loading peers: {e}")
 
 
 
@@ -133,7 +137,7 @@ class Peer:
                         # Do not break after processing; wait for more messages
 
         except Exception as e:
-            logging.error(f"Error during P2P communication with {peer_info}: {e}")
+            logging.error(f"Error during P2P communication with {addr}: {e}")
         finally:
             logging.info(f"Closing connection with {addr}")
             self.active_peers.remove(addr)  # Clean up after disconnection
@@ -288,20 +292,25 @@ class Peer:
             await self.rewrite_peers_file()
 
     async def rewrite_peers_file(self):
-        """Rewrites the peers.dat file with IP and last seen timestamp, excluding ports."""
+        """Rewrites the peers.dat file with unique IP and last seen timestamp, excluding ports."""
         try:
-            # Create a set comprehension to ensure uniqueness and proper format
-            # This automatically handles both adding ports where missing and deduplication
-            unique_peers = {f"{peer}:{self.p2p_port}" if ":" not in peer else peer for peer in self.peers}
-
             async with aiofiles.open("peers.dat", "w") as f:
-                for ip, last_seen in self.peers.items():
+                unique_ips = set()
+                for peer in self.peers:
+                    if ":" in peer:
+                        ip, _ = peer.split(":", 1)
+                        unique_ips.add(ip)
+                    else:
+                        unique_ips.add(peer)
+
+                for ip in unique_ips:
+                    last_seen = self.peers.get(ip)  # Get the last seen timestamp for the IP
                     # Prepare last_seen string, 'None' if not available
                     last_seen_str = 'None' if last_seen is None else str(last_seen)
                     # Write the peer IP and last_seen timestamp to the file
                     await f.write(f"{ip},{last_seen_str}\n")
 
-            logging.info("Peers file rewritten successfully with current data, excluding ports.")
+            logging.info("Peers file rewritten successfully with unique IPs and current data, excluding ports.")
         except IOError as e:
             logging.error(f"Failed to write to peers.dat: {e}")
         except Exception as e:
