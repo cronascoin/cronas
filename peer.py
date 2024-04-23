@@ -67,23 +67,14 @@ class Peer:
     async def start_p2p_server(self):
         """Start the P2P server and handle any startup errors."""
         try:
-            assert self is not None, "Null pointer exception: self is null"
-
             self.p2p_server = await asyncio.start_server(
                 self.handle_peer_connection, self.host, self.p2p_port)
-            assert self.p2p_server is not None, "Null pointer exception: p2p_server is null"
-
             logging.info(f"P2P server {self.server_id} listening on {self.host}:{self.p2p_port}")
             async with self.p2p_server:
-                assert self.p2p_server is not None, "Null pointer exception: p2p_server is null"
-
                 await self.p2p_server.serve_forever()
 
-        except AssertionError as e:
-            logging.error(f"Fatal error during P2P server startup: {e}")
-
         except OSError as e:
-            if e.errno == socket.EADDRINUSE:  # Error code for address already in use, works across platforms
+            if e.errno == socket.EADDRINUSE:
                 logging.error(f"Port {self.p2p_port} is already in use. Please ensure the port is free and try again.")
             else:
                 logging.error(f"Failed to start server: {e}")
@@ -92,6 +83,7 @@ class Peer:
         except Exception as e:
             logging.error(f"Error starting P2P server: {e}")
             await self.close_p2p_server()
+
 
 
     async def connect_to_known_peers(self):
@@ -133,6 +125,7 @@ class Peer:
                 while '\n' in data_buffer:
                     message, data_buffer = data_buffer.split('\n', 1)
                     if message:
+                        logging.info(f"Received message from {addr}: {message}")
                         await self.process_message(json.loads(message), writer)
                         # Do not break after processing; wait for more messages
 
@@ -161,20 +154,23 @@ class Peer:
     async def connect_to_peer(self, host, port):
         peer_info = f"{host}:{port}"
         if host in [self.host, self.external_ip, "127.0.0.1"]:
+            logging.info(f"Skipping connection to self or localhost: {peer_info}")
             return
 
         peer_tuple = (host, port)  # Use a tuple for consistency
 
         if peer_tuple in self.peers:
+            logging.info(f"Already connected to {peer_info}")
             return
 
-        logging.info(f"Attempting to connect to {host}:{port}")
+        logging.info(f"Attempting to connect to {peer_info}")
 
         attempt = 0
         writer = None
 
         while attempt < 5:
             try:
+                logging.info(f"Connecting to {peer_info}, attempt {attempt + 1}...")
                 reader, writer = await asyncio.open_connection(host, port)
 
                 seq = self.hello_seq + 1
@@ -204,10 +200,11 @@ class Peer:
 
                     await self.listen_for_messages(reader, writer)
                     
+                    logging.info(f"Successfully connected to {peer_info}")
                     break  # Exit the loop after successful connection
 
             except Exception as e:
-                logging.error(f"Failed to connect to {host}:{port}: {e}")
+                logging.error(f"Failed to connect to {peer_info}: {e}")
 
             finally:
                 attempt += 1
@@ -215,7 +212,7 @@ class Peer:
                     await asyncio.sleep(self.calculate_backoff(attempt))
 
         if attempt == 5:
-            logging.info(f"Max connection attempts reached for {host}:{port}.")
+            logging.info(f"Max connection attempts reached for {peer_info}.")
 
         if writer is not None and not writer.is_closing():
             writer.close()

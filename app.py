@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 from peer import Peer
 from rpc import RPCServer
@@ -17,10 +18,8 @@ async def cancel_remaining_tasks():
     for task in asyncio.all_tasks():
         if task is not asyncio.current_task():
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task  # Await task to allow it to cancel gracefully
-            except asyncio.CancelledError:
-                pass  # Task cancellation is expected
 
 async def main():
     p2p_host = '0.0.0.0'
