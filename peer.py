@@ -166,7 +166,7 @@ class Peer:
                 data = await reader.readline()
                 ack_message = json.loads(data.decode())
                 if ack_message["type"] == "ack":
-                    self.peers[peer_info] = None   # Add peer in string format
+                    self.peers.add(peer_info)
                     await self.rewrite_peers_file()  # Update peers.dat accordingly
                     self.hello_seq = seq
 
