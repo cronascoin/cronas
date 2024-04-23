@@ -38,7 +38,7 @@ class Peer:
             if os.path.exists("peers.dat"):
                 # Load peers from file
                 async with aiofiles.open("peers.dat", "r") as f:
-                    for line in f:
+                    async for line in f:  # Use async for to iterate over lines asynchronously
                         parts = line.strip().split(',')
                         if len(parts) == 2:
                             ip, last_seen_str = parts
