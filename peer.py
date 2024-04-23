@@ -53,7 +53,8 @@ class Peer:
         else:
             # Initialize peers from seeds and save to file
             for seed in self.seeds:
-                self.peers.add(seed)
+                #self.peers.add(seed)
+                self.peers[seed] = int(time.time()) 
             await self.rewrite_peers_file()  # Save seeds to peers.dat
         logging.info("Peers loaded from file or initialized from seeds.")
 
