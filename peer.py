@@ -17,7 +17,8 @@ class Peer:
         self.server_id = str(uuid.uuid4())
         self.host = host
         self.p2p_port = p2p_port
-        self.peers = set(seeds or [])
+        #self.peers = set(seeds or [])
+        self.peers = {}  # Initialize as a dictionary
         self.seeds = seeds
         self.external_ip = self.detect_ip_address()
         self.hello_seq = 0  # Initialize the hello_seq attribute here
@@ -25,19 +26,27 @@ class Peer:
         self.retry_attempts = {}  # Map: peer_identifier -> (last_attempt_time, attempt_count)
         self.cooldown_period = 60  # Cooldown period in seconds before retrying a connection
         self.heartbeat_tasks = []  # Add this line to track heartbeat tasks
-
+        self.known_ips = set() 
+        
 
     async def async_init(self):
         await self.load_peers()
 
     async def load_peers(self):
         """Loads peers from the peers.dat file, or initializes from seeds if not present."""
+        """
         if os.path.exists("peers.dat"):
             # Load peers from file
             async with aiofiles.open("peers.dat", "r") as f:
                 async for line in f:
                     peer = line.strip()
                     self.peers.add(peer)
+        """
+        if os.path.exists("peers.dat"):
+            async with aiofiles.open("peers.dat", "r") as f:
+                async for line in f:
+                    peer, last_seen_str = line.strip().split(":")
+                    self.peers[peer] = int(last_seen_str)  # Convert to int
         else:
             # Initialize peers from seeds and save to file
             for seed in self.seeds:
@@ -132,32 +141,28 @@ class Peer:
 
 
     async def connect_to_peer(self, host, port):
-        peer_info = f"{host}:{port}"
+        peer_address = (host, port)
+
         if host in [self.host, self.external_ip, "127.0.0.1"]:
-            logging.info(f"Skipping connection to self or localhost: {peer_info}")
             return
 
-        peer_tuple = (host, port)  # Use a tuple for consistency
+        if host not in self.known_ips:
+            self.known_ips.add(host)
 
-        if peer_tuple in self.peers:
-            logging.info(f"Already connected to {peer_info}")
+        if peer_address in self.peers:
             return
 
-        logging.info(f"Attempting to connect to {peer_info}")
+        logging.info(f"Attempting to connect to {host}:{port}")
 
         attempt = 0
-        writer = None
-
         while attempt < 5:
             try:
-                logging.info(f"Connecting to {peer_info}, attempt {attempt + 1}...")
                 reader, writer = await asyncio.open_connection(host, port)
 
-                seq = self.hello_seq + 1
                 handshake_msg = {
                     "type": "hello",
                     "payload": f"Hello from {self.host}",
-                    "seq": seq,
+                    "seq": self.hello_seq + 1,
                     "server_id": self.server_id
                 }
                 writer.write(json.dumps(handshake_msg).encode() + b'\n')
@@ -166,22 +171,22 @@ class Peer:
                 data = await reader.readline()
                 ack_message = json.loads(data.decode())
                 if ack_message["type"] == "ack":
-                    self.peers.add(peer_info)
-                    await self.rewrite_peers_file()  # Update peers.dat accordingly
-                    self.hello_seq = seq
+                    self.peers[peer_address] = int(time.time())
+                    await self.rewrite_peers_file()
+                    self.hello_seq += 1
 
                     asyncio.create_task(self.send_heartbeat(writer))
-                    request_message = {"type": "request_peer_list", "server_id": self.server_id}
-                    writer.write(json.dumps(request_message).encode() + b'\n')
+                    request_msg = {"type": "request_peer_list", "server_id": self.server_id}
+                    writer.write(json.dumps(request_msg).encode() + b'\n')
                     await writer.drain()
 
                     await self.listen_for_messages(reader, writer)
-                    
-                    logging.info(f"Successfully connected to {peer_info}")
-                    break  # Exit the loop after successful connection
 
-            except Exception as e:
-                logging.error(f"Failed to connect to {peer_info}: {e}")
+                    logging.info(f"Successfully connected to {host}:{port}")
+                    break
+
+            except Exception:
+                pass
 
             finally:
                 attempt += 1
@@ -189,13 +194,11 @@ class Peer:
                     await asyncio.sleep(self.calculate_backoff(attempt))
 
         if attempt == 5:
-            logging.info(f"Max connection attempts reached for {peer_info}.")
+            logging.info(f"Max connection attempts reached for {host}:{port}.")
 
-        if writer is not None and not writer.is_closing():
+        if not writer.is_closing():
             writer.close()
             await writer.wait_closed()
-
-        self.connecting_peers.remove(peer_tuple)  # Ensure this uses the tuple format
 
 
     def calculate_backoff(self, attempt):
@@ -260,6 +263,7 @@ class Peer:
     async def rewrite_peers_file(self):
         """Rewrites the peers.dat file, ensuring all entries have a port and are unique."""
         try:
+            """
             async with aiofiles.open("peers.dat", "w") as f:
                 unique_peers = {f"{peer}:{self.p2p_port}" if ":" not in peer else peer for peer in self.peers}
                 for peer in self.peers:
@@ -271,6 +275,10 @@ class Peer:
                 # Write each unique peer to the file
                 for peer in unique_peers:
                     await f.write(f"{peer}\n")
+            """
+            async with aiofiles.open("peers.dat", "w") as f:
+                for peer, last_seen in self.peers.items():  # Iterate key-value pairs
+                    await f.write(f"{peer}:{last_seen}\n")
 
             logging.info("Peers file rewritten successfully, with duplicates removed.")
         except IOError as e:
