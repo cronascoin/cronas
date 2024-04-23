@@ -8,6 +8,7 @@ import uuid
 import random
 import aiofiles
 import traceback
+import time
 
 logging.basicConfig(level=logging.INFO)
 
@@ -263,17 +264,14 @@ class Peer:
                 unique_peers = {f"{peer}:{self.p2p_port}" if ":" not in peer else peer for peer in self.peers}
                 for peer in self.peers:
                     # Ensure each peer entry has a port
-                    if ":" not in peer:
-                        peer_with_port = f"{peer}:{self.p2p_port}"
-                    else:
-                        peer_with_port = peer
+                    peer_with_port = f"{peer}:{self.p2p_port}" if ":" not in peer else peer
                     # Add the formatted peer to the set of unique peers
                     unique_peers.add(peer_with_port)
-                
+
                 # Write each unique peer to the file
                 for peer in unique_peers:
                     await f.write(f"{peer}\n")
-                    
+
             logging.info("Peers file rewritten successfully, with duplicates removed.")
         except IOError as e:
             logging.error(f"Failed to write to peers.dat: {e}")
