@@ -95,20 +95,14 @@ class Peer:
 
     async def connect_to_peer(self, host, port):
         peer_address = (host, port)
-        peer_info = f"{host}:{port}"  # Or (host, port) if you use tuples
+        peer_info = f"{host}:{port}"
 
         if host in [self.host, self.external_ip, "127.0.0.1"]:
             return
 
-        if host not in self.known_ips:
-            self.known_ips.add(host)
-
-        if peer_address in self.peers:  # Assuming peers contain connected + potential
-            return  
-
         logging.info(f"Attempting to connect to {peer_info}")
 
-        writer = None  
+        writer = None
         attempt = 0
         while attempt < 5:
             try:
@@ -124,17 +118,16 @@ class Peer:
                 await writer.drain()
 
                 data = await reader.readline()
+                if not data:
+                    logging.error("No data received in response to handshake.")
+                    break
                 ack_message = json.loads(data.decode())
 
-                if ack_message["type"] == "ack":
-                    if peer_info not in self.peers:  # New peer
-                        self.peers[peer_info] = int(time.time()) 
-                        logging.info(f"New peer discovered: {peer_info}") 
-
+                if ack_message.get("type") == "ack":
+                    self.peers[peer_info] = int(time.time())  # update or add new peer
+                    logging.info(f"Connected and acknowledged by peer: {peer_info}")
                     self.active_peers.add(peer_address)
-                    await self.rewrite_peers_file()  
-                    self.hello_seq += 1
-                    
+
                     asyncio.create_task(self.send_heartbeat(writer))
                     request_msg = {"type": "request_peer_list", "server_id": self.server_id}
                     writer.write(json.dumps(request_msg).encode() + b'\n')
@@ -142,6 +135,7 @@ class Peer:
 
                     await self.listen_for_messages(reader, writer)
 
+                    self.hello_seq += 1
                     logging.info(f"Successfully connected to {host}:{port}")
                     break
 
@@ -150,15 +144,14 @@ class Peer:
 
             finally:
                 attempt += 1
+                if writer and not writer.is_closing():
+                    writer.close()
+                    await writer.wait_closed()
                 if attempt < 5:
                     await asyncio.sleep(self.calculate_backoff(attempt))
 
         if attempt == 5:
             logging.info(f"Max connection attempts reached for {peer_info}.")
-
-        if writer and not writer.is_closing(): 
-            writer.close()
-            await writer.wait_closed()
 
 
     def detect_ip_address(self):
@@ -197,56 +190,47 @@ class Peer:
 
     async def handle_peer_connection(self, reader, writer):
         addr = writer.get_extra_info('peername')
-        assert self is not None, "Null pointer exception: self is null"  
-        assert addr is not None, "Null pointer exception: addr is null"  
-
-        self.active_peers.add(addr) 
         logging.info(f"Connected to peer {addr}")
 
         try:
             data_buffer = ""
             while True:
-                try:
-                    data = await reader.read(1024)
-                    if not data:
-                        if reader.at_eof():
-                            logging.info("Peer disconnected gracefully. Exiting listen loop.")
-                            break  
-                        else:
-                            logging.info("No data received. Waiting for more data...")
-                            await asyncio.sleep(1)
-                            continue
+                data = await reader.read(1024)
+                if not data:
+                    if reader.at_eof():
+                        logging.info("Peer disconnected gracefully. Exiting listen loop.")
+                        break
+                    else:
+                        logging.info("No data received. Waiting for more data...")
+                        continue
 
-                    data_buffer += data.decode()
-                    while '\n' in data_buffer:
-                        message, data_buffer = data_buffer.split('\n', 1)
-                        if message:
-                            logging.info(f"Received message from {addr}: {message}")
-                            await self.process_message(json.loads(message), writer)
+                data_buffer += data.decode()
+                while '\n' in data_buffer:
+                    message, data_buffer = data_buffer.split('\n', 1)
+                    if message:
+                        message_obj = json.loads(message)
+                        logging.info(f"Received message from {addr}: {message_obj}")
+                        await self.process_message(message_obj, writer)
 
-                            # Logic for adding and saving new peers
-                            host, port = writer.get_extra_info('socketname')  # Extract P2P port of the peer
-                            peer_info = f"{host}:{port}"  
+                        if message_obj.get("type") == "hello" and 'listening_port' in message_obj:
+                            peer_host = addr[0]
+                            peer_port = message_obj['listening_port']  # Use the provided listening port
+                            peer_info = f"{peer_host}:{peer_port}"
 
-                            if peer_info not in self.peers:  
-                                logging.info(f"New peer discovered (inbound connection): {peer_info}") 
+                            if peer_info not in self.peers:
+                                logging.info(f"New peer discovered (inbound connection): {peer_info}")
                                 self.peers[peer_info] = int(time.time())
-                                await self.rewrite_peers_file() 
+                                await self.rewrite_peers_file()
 
-                except asyncio.CancelledError:
-                    logging.info(f"Connection task with {addr} cancelled (likely due to shutdown)")
-                    break  
-
-                except Exception as e:
-                    logging.error(f"Error during P2P communication with {addr}: {e}")
-
+        except asyncio.CancelledError:
+            logging.info(f"Connection task with {addr} cancelled")
+        except Exception as e:
+            logging.error(f"Error during P2P communication with {addr}: {e}")
         finally:
             logging.info(f"Closing connection with {addr}")
-            self.active_peers.remove(addr)  
+            self.active_peers.remove(addr)
             writer.close()
-            await writer.wait_closed() 
-
-
+            await writer.wait_closed()
 
 
     async def handle_peer_list(self, peer_data):
