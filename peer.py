@@ -225,8 +225,8 @@ class Peer:
                             await self.process_message(json.loads(message), writer)
 
                             # Logic for adding and saving new peers
-                            peer_address = writer.get_extra_info('peername')
-                            peer_info = f"{peer_address[0]}:{peer_address[1]}"  
+                            host, port = writer.get_extra_info('socketname')  # Extract P2P port of the peer
+                            peer_info = f"{host}:{port}"  
 
                             if peer_info not in self.peers:  
                                 logging.info(f"New peer discovered (inbound connection): {peer_info}") 
@@ -245,6 +245,7 @@ class Peer:
             self.active_peers.remove(addr)  
             writer.close()
             await writer.wait_closed() 
+
 
 
 
