@@ -37,7 +37,6 @@ class Peer:
 
     async def async_init(self):
         await self.load_peers()
-        await self.connect_to_known_peers()  # Connect to them
 
     def calculate_backoff(self, attempt):
         """Calculates the backoff time with jitter."""
@@ -170,8 +169,6 @@ class Peer:
         if attempt == 5:
             logging.info(f"Max connection attempts reached for {peer_info}.")
 
-   
-
 
     def detect_ip_address(self):
         """
@@ -208,59 +205,47 @@ class Peer:
 
 
     async def handle_peer_connection(self, reader, writer):
-        addr = writer.get_extra_info('peername')
-        logging.info(f"Connected to peer {addr}")
+        peer_address = writer.get_extra_info('peername')
 
         try:
-            data_buffer = ""
+            buffer = ''
             while True:
                 data = await reader.read(1024)
                 if not data:
-                    if reader.at_eof():
-                        logging.info("Peer disconnected gracefully. Exiting listen loop.")
-                        break
-                    else:
-                        logging.info("No data received. Waiting for more data...")
-                        continue
+                    break
 
-                data_buffer += data.decode()
-                while '\n' in data_buffer:
-                    message, data_buffer = data_buffer.split('\n', 1)
+                buffer += data.decode()
+                while '\n' in buffer:
+                    message, buffer = buffer.split('\n', 1)
                     if message:
                         message_obj = json.loads(message)
-                        logging.info(f"Received message from {addr}: {message_obj}")
                         await self.process_message(message_obj, writer)
 
-                        if message_obj.get("type") == "hello" and 'listening_port' in message_obj:
-                            peer_host = addr[0]
-                            peer_port = message_obj['listening_port']  # Use the provided listening port
-                            peer_info = f"{peer_host}:{peer_port}"
+                        if message_obj.get('type') == 'hello' and 'listening_port' in message_obj:
+                            host, port = peer_address
+                            peer_info = f"{host}:{message_obj['listening_port']}"
 
                             if peer_info not in self.peers:
-                                logging.info(f"New peer discovered (inbound connection): {peer_info}")
                                 self.peers[peer_info] = int(time.time())
                                 await self.rewrite_peers_file()
 
         except asyncio.CancelledError:
-            logging.info(f"Connection task with {addr} cancelled")
-        except asyncio.IncompleteReadError as e:
-            logging.error(f"Incomplete read from {addr}: {e}")
-        except json.JSONDecodeError as e:
-            logging.error(f"JSON decoding error for message from {addr}: {e}")
-        except Exception as e:
-            logging.error(f"General error during P2P communication with {addr}: {e}")
+            logging.info(f"Connection task with {peer_address} cancelled")
+        except (asyncio.IncompleteReadError, json.JSONDecodeError):
+            pass  # Most likely a connection closed before finishing a message
+        except Exception:
+            logging.exception(f"General error during P2P communication with {peer_address}")
         finally:
-            # Ensure the writer is properly closed
             if not writer.is_closing():
                 writer.close()
                 await writer.wait_closed()
-            logging.info(f"Connection with {addr} closed")
+            logging.info(f"Connection with {peer_address} closed")
 
 
     async def handle_peer_list(self, peer_data):
         """Processes received peer list, updating internal data structures."""
         logging.info("Processing new peer list...")
-        
+
         for peer_info in peer_data:
             if ':' not in peer_info:
                 logging.error(f"Invalid peer info format (missing port): {peer_info}")
@@ -274,11 +259,9 @@ class Peer:
             peer_address = f"{ip}:{port}"
             if peer_address not in self.peers:
                 logging.info(f"Adding new peer: {peer_address}")
-                self.peers[peer_address] = int(time.time())
             else:
                 logging.info(f"Updating last seen time for known peer: {peer_address}")
-                self.peers[peer_address] = int(time.time())
-        
+            self.peers[peer_address] = int(time.time())
         # After processing the peer list, rewrite the peers file with updated information
         try:
             await self.rewrite_peers_file()
@@ -329,12 +312,10 @@ class Peer:
         logging.info("Peers loaded from file or initialized from seeds.")
 
 
-    def parse_address(address):
-        # Regex to match IP:Port where IP can be IPv4 or IPv6
-        match = re.match(r"^(?:(\[[\d:a-fA-F]+\])|([\d\.]+)):(\d+)$", address)
-        if match:
-            ip = match.group(1) or match.group(2)
-            port = int(match.group(3))
+    def parse_address(self):
+        if match := re.match(r"^(?:(\[[\d:a-fA-F]+\])|([\d\.]+)):(\d+)$", self):
+            ip = match[1] or match[2]
+            port = int(match[3])
             return ip.strip('[]'), port
         else:
             raise ValueError("Invalid address format")

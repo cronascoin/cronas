@@ -4,6 +4,7 @@
         "aiofiles",
         "aiohttp",
         "cooldown",
+        "cronas",
         "DGRAM",
         "EADDRINUSE",
         "peername",
