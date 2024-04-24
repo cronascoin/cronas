@@ -28,6 +28,7 @@ class Peer:
         self.heartbeat_tasks = []  # Add this line to track heartbeat tasks
         self.known_ips = set()
         self.connected_peers = set()
+        self.new_peers = []
         
 
     async def async_init(self):
@@ -38,10 +39,12 @@ class Peer:
             async with aiofiles.open("peers.dat", "r") as f:
                 async for line in f:
                     try:
-                        peer, last_seen_str = line.strip().split(":")
-                        self.peers[peer] = int(last_seen_str)
-                    except ValueError:
-                        logging.warning(f"Invalid line in peers.dat: {line}")
+                        peer, port, last_seen_str = line.strip().split(":")
+                        last_seen = int(last_seen_str)
+                        logging.debug(f"Loaded timestamp: {last_seen}, type: {type(last_seen)}")
+                        self.peers[peer] = last_seen
+                    except ValueError as e:
+                        logging.info(f"error:{e}")
         else:
             # Initialize peers from seeds and save to file
             for seed in self.seeds:
