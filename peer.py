@@ -112,7 +112,8 @@ class Peer:
                     "type": "hello",
                     "payload": f"Hello from {self.host}",
                     "seq": self.hello_seq + 1,
-                    "server_id": self.server_id
+                    "server_id": self.server_id,
+                    "listening_port": self.p2p_port
                 }
                 writer.write(json.dumps(handshake_msg).encode() + b'\n')
                 await writer.drain()
@@ -302,7 +303,15 @@ class Peer:
         logging.info(f"Received message from {addr}: {message}")
 
         if message.get("type") == "hello":
-            logging.info(f"Received handshake from {addr}")
+            if 'listening_port' in message:
+                peer_port = message['listening_port']
+                peer_info = f"{addr[0]}:{peer_port}"  # addr[0] is the peer's IP
+                if peer_info not in self.peers:
+                    self.peers[peer_info] = int(time.time())  # Record the time of addition/update
+                    logging.info(f"Added new peer {peer_info}.")
+                    await self.rewrite_peers_file()
+            else:
+                logging.error("No listening port provided in handshake message.")
 
             # Acknowledge the handshake
             ack_message = {
@@ -313,17 +322,6 @@ class Peer:
             writer.write(json.dumps(ack_message).encode() + b'\n')
             await writer.drain()
             logging.info(f"Handshake acknowledged to {addr}")
-
-            # Add or update the peer's information in the peers list
-            peer_host, _ = addr
-            if peer_port := message.get('listening_port'):
-                peer_info = f"{peer_host}:{peer_port}"
-                if peer_info not in self.peers:
-                    self.peers[peer_info] = int(time.time())
-                    logging.info(f"Added new peer {peer_info}.")
-                    await self.rewrite_peers_file()
-            else:
-                logging.error("No listening port provided in handshake message.")
 
         elif message.get("type") == "request_peer_list":
             logging.info(f"Peer list requested by {addr}")
@@ -419,7 +417,6 @@ class Peer:
             logging.error(f"Failed to rewrite peers.dat: {e}\n{traceback.format_exc()}")
 
 
-
     async def send_heartbeat(self, writer):
         """Sends a heartbeat message to the connected peer every 60 seconds."""
         try:
@@ -434,13 +431,22 @@ class Peer:
                 await writer.drain()
                 await asyncio.sleep(60)  # Send a heartbeat every 60 seconds.
         except asyncio.CancelledError:
-            logging.info("Closing heartbeat messages.")
+            logging.info("Heartbeat sending cancelled.")
         except Exception as e:
             logging.error(f"Error sending heartbeat: {e}")
+            # Add backoff or delay before retrying to avoid spamming in case of persistent error
+            await asyncio.sleep(10)
+            if not writer.is_closing():
+                logging.info("Attempting to restart heartbeat.")
+                self.restart_heartbeat(writer)
 
-            # Example of starting a heartbeat task and tracking it
+    def restart_heartbeat(self, writer):
+        if writer and not writer.is_closing():
             task = asyncio.create_task(self.send_heartbeat(writer))
             self.heartbeat_tasks.append(task)  # Track the task
+            logging.info("Heartbeat task restarted.")
+        else:
+            logging.info("Writer is closing, not restarting heartbeat.")
 
 
     async def send_peer_list(self, writer):
