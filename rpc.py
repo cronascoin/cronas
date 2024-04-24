@@ -1,3 +1,6 @@
+#Copyright 2024 cronas.org
+#rpc.py
+
 from aiohttp import web
 import json
 import logging

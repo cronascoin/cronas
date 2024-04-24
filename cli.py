@@ -1,4 +1,6 @@
-# cli.py
+#Copyright 2024 cronas.org
+#cli.py
+
 import requests
 import sys
 
