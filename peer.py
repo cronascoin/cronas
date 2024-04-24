@@ -135,9 +135,14 @@ class Peer:
                     await self.rewrite_peers_file()  
                     self.hello_seq += 1
                     
-                    # ... rest of connection logic (heartbeat, message handling) ...
+                    asyncio.create_task(self.send_heartbeat(writer))
+                    request_msg = {"type": "request_peer_list", "server_id": self.server_id}
+                    writer.write(json.dumps(request_msg).encode() + b'\n')
+                    await writer.drain()
 
-                    logging.info(f"Successfully connected to {peer_info}")
+                    await self.listen_for_messages(reader, writer)
+
+                    logging.info(f"Successfully connected to {host}:{port}")
                     break
 
             except Exception as e:
