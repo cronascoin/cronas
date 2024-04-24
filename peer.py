@@ -177,6 +177,7 @@ class Peer:
             logging.info(f"Failed to detect external IP address: {e}")
             return '127.0.0.1'
         
+        
     async def add_new_peers(self, new_peers):
         updated = False
         for ip in new_peers:
@@ -196,10 +197,10 @@ class Peer:
 
     async def handle_peer_connection(self, reader, writer):
         addr = writer.get_extra_info('peername')
-        assert self is not None, "Null pointer exception: self is null"  # Debugging assertion
-        assert addr is not None, "Null pointer exception: addr is null"  # Debugging assertion
+        assert self is not None, "Null pointer exception: self is null"  
+        assert addr is not None, "Null pointer exception: addr is null"  
 
-        self.active_peers.add(addr)  # Assuming you have initialized self.active_peers as a set 
+        self.active_peers.add(addr) 
         logging.info(f"Connected to peer {addr}")
 
         try:
@@ -222,20 +223,29 @@ class Peer:
                         if message:
                             logging.info(f"Received message from {addr}: {message}")
                             await self.process_message(json.loads(message), writer)
-                            await self.rewrite_peers_file() # Save the change
+
+                            # Logic for adding and saving new peers
+                            peer_address = writer.get_extra_info('peername')
+                            peer_info = f"{peer_address[0]}:{peer_address[1]}"  
+
+                            if peer_info not in self.peers:  
+                                logging.info(f"New peer discovered (inbound connection): {peer_info}") 
+                                self.peers[peer_info] = int(time.time())
+                                await self.rewrite_peers_file() 
 
                 except asyncio.CancelledError:
                     logging.info(f"Connection task with {addr} cancelled (likely due to shutdown)")
-                    break  # Exit the while loop if shutdown is in progress
+                    break  
 
-        except Exception as e:
-            logging.error(f"Error during P2P communication with {addr}: {e}")
+                except Exception as e:
+                    logging.error(f"Error during P2P communication with {addr}: {e}")
 
         finally:
             logging.info(f"Closing connection with {addr}")
-            self.active_peers.remove(addr)  # Remove the peer from active_peers
+            self.active_peers.remove(addr)  
             writer.close()
             await writer.wait_closed() 
+
 
 
     async def handle_peer_list(self, peer_data):
