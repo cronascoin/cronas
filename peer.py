@@ -395,23 +395,16 @@ class Peer:
     async def rewrite_peers_file(self, include_new_peers=False):
         """Rewrites the peers.dat file, ensuring uniqueness and optionally batching updates."""
         try:
-            peers_to_write = self.peers.copy()  # Start with a copy of existing peers
+            peers_to_write = self.peers.copy()  
 
             if include_new_peers:
-                peers_to_write.update(self.new_peers)  # Add new peers, maintaining uniqueness
-                self.new_peers.clear()  
+                peers_to_write.update(self.new_peers)  # Combine peers
+                self.new_peers.clear()  # Clear after the update
 
-                async with aiofiles.open("peers.dat", "w") as f:
-                    if include_new_peers:
-                        self.new_peers.update(self.peers)  # Update in-place
-                        peers_to_write = self.new_peers  
-                        self.new_peers.clear()  
-                    else:
-                        peers_to_write = self.peers
+            async with aiofiles.open("peers.dat", "w") as f:
+                for peer, last_seen in peers_to_write.items():  
+                    await f.write(f"{peer}:{last_seen}\n")
 
-                    for peer, last_seen in peers_to_write.items():  
-                        await f.write(f"{peer}:{last_seen}\n")
-                        
             logging.info("Peers file rewritten successfully.")  
         except IOError as e:
             logging.error(f"Failed to write to peers.dat: {e}")
