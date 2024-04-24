@@ -26,22 +26,22 @@ class Peer:
         self.retry_attempts = {}  # Map: peer_identifier -> (last_attempt_time, attempt_count)
         self.cooldown_period = 60  # Cooldown period in seconds before retrying a connection
         self.heartbeat_tasks = []  # Add this line to track heartbeat tasks
-        self.known_ips = set() 
+        self.known_ips = set()
+        self.connected_peers = set()
         
 
     async def async_init(self):
         await self.load_peers()
 
     async def load_peers(self):
-        """Loads peers from the peers.dat file, or initializes from seeds if not present."""
         if os.path.exists("peers.dat"):
             async with aiofiles.open("peers.dat", "r") as f:
                 async for line in f:
-                    try: 
+                    try:
                         peer, last_seen_str = line.strip().split(":")
-                        self.peers[peer] = int(last_seen_str)  # Convert to int
+                        self.peers[peer] = int(last_seen_str)
                     except ValueError:
-                        logging.error(f"Invalid peer entry in peers.dat: {line.strip()}")
+                        logging.warning(f"Invalid line in peers.dat: {line}")
         else:
             # Initialize peers from seeds and save to file
             for seed in self.seeds:
@@ -173,8 +173,9 @@ class Peer:
 
                 data = await reader.readline()
                 ack_message = json.loads(data.decode())
+                
                 if ack_message["type"] == "ack":
-                    self.peers[peer_address] = int(time.time())
+                    self.active_peers.add(peer_address) 
                     await self.rewrite_peers_file()
                     self.hello_seq += 1
 
@@ -263,51 +264,40 @@ class Peer:
         if updated:
             await self.rewrite_peers_file()
 
+
     async def rewrite_peers_file(self):
         """Rewrites the peers.dat file, ensuring all entries have a port and are unique."""
         try:
-            """
             async with aiofiles.open("peers.dat", "w") as f:
-                unique_peers = {f"{peer}:{self.p2p_port}" if ":" not in peer else peer for peer in self.peers}
-                for peer in self.peers:
-                    # Ensure each peer entry has a port
-                    peer_with_port = f"{peer}:{self.p2p_port}" if ":" not in peer else peer
-                    # Add the formatted peer to the set of unique peers
-                    unique_peers.add(peer_with_port)
-
-                # Write each unique peer to the file
-                for peer in unique_peers:
-                    await f.write(f"{peer}\n")
-            """
-            async with aiofiles.open("peers.dat", "w") as f:
-                for peer, last_seen in self.peers.items():  # Iterate key-value pairs
+                for peer, last_seen in self.peers.items():  
                     await f.write(f"{peer}:{last_seen}\n")
 
-            logging.info("Peers file rewritten successfully, with duplicates removed.")
+            logging.info("Peers file rewritten successfully.")  # Removed 'with duplicates removed'
         except IOError as e:
             logging.error(f"Failed to write to peers.dat: {e}")
-
         except Exception as e:
             logging.error(f"Failed to rewrite peers.dat: {e}\n{traceback.format_exc()}")
 
 
-    async def add_peer(self, peer_info):
-        # Directly use peer_info without splitting to handle IP:Port format
-        if ":" in peer_info:
-            ip = peer_info.split(":")[0]
-        else:
-            ip = peer_info
-            peer_info += f":{self.p2p_port}"  # Append default port if not specified
-        
-        if ip in [self.host, self.external_ip, "127.0.0.1"]:
-            logging.info(f"Skipping adding self or localhost to peers: {ip}")
-            return
-        
-        # Check if peer_info (which could contain ports) is not already in self.peers
-        if peer_info not in self.peers:
-            self.peers[peer_info] = None  # Add to the dictionary
-            await self.rewrite_peers_file()  # Ensure this call is awaited
-            logging.info(f"Added new peer: {peer_info}")
+    async def rewrite_peers_file(self, include_new_peers=False):
+        """Rewrites the peers.dat file, ensuring uniqueness and optionally batching updates."""
+        try:
+            peers_to_write = set(self.peers.keys())  # Start with unique peers
+
+            if include_new_peers:
+                peers_to_write.update(self.new_peers)  # Add new peers, maintaining uniqueness
+                self.new_peers.clear()  
+
+            async with aiofiles.open("peers.dat", "w") as f:
+                for peer in peers_to_write:
+                    last_seen = self.peers.get(peer, 0)  
+                    await f.write(f"{peer}:{last_seen}\n")
+
+            logging.info("Peers file rewritten successfully.")  
+        except IOError as e:
+            logging.error(f"Failed to write to peers.dat: {e}")
+        except Exception as e:
+            logging.error(f"Failed to rewrite peers.dat: {e}\n{traceback.format_exc()}")
 
 
     async def update_peers(self, new_peers):
@@ -340,18 +330,6 @@ class Peer:
             logging.info(f"Attempting to connect to new peer: {host}")
             self.peers[peer_info] = None 
             asyncio.create_task(self.connect_to_peer(host, port))
-
-
-    async def respond_to_heartbeat(self, writer, message):
-        """Send a heartbeat_ack in response to a heartbeat."""
-        logging.info(f"Heartbeat received with message: {message}")
-        ack_message = {
-            "type": "heartbeat_ack",
-            "payload": "pong",
-            "server_id": self.server_id
-        }
-        writer.write(json.dumps(ack_message).encode() + b'\n')
-        await writer.drain()
 
 
     async def send_heartbeat(self, writer):
@@ -422,16 +400,7 @@ class Peer:
             await self.send_peer_list(writer)
 
         elif message.get("type") == "heartbeat":
-            logging.info(f"Heartbeat received from {addr}")
-            # Send a heartbeat acknowledgment
-            ack_message = {
-                "type": "heartbeat_ack",
-                "payload": "pong",
-                "server_id": self.server_id
-            }
-            writer.write(json.dumps(ack_message).encode() + b'\n')
-            await writer.drain()
-            logging.info(f"Heartbeat acknowledged to {addr}".format(addr))
+            await self.respond_to_heartbeat(writer, message) 
 
         elif message.get("type") == "peer_list":
             logging.info(f"Received peer list from {addr}")
@@ -446,6 +415,25 @@ class Peer:
 
         else:
             logging.info(f"Unhandled message type from {addr}: {message['type']}")
+
+
+    async def respond_to_heartbeat(self, writer, message):
+        """Send a heartbeat_ack in response to a heartbeat and update last_seen."""
+        logging.info(f"Heartbeat received with message: {message}")
+
+        peer_info = writer.get_extra_info('peername')  # Extract peer_info
+
+        # Update last_seen in your peers dictionary
+        if peer_info in self.peers:
+            self.peers[peer_info] = int(time.time())  # Update with current timestamp
+
+        ack_message = {
+            "type": "heartbeat_ack",
+            "payload": "pong",
+            "server_id": self.server_id
+        }
+        writer.write(json.dumps(ack_message).encode() + b'\n')
+        await writer.drain()
 
 
     async def close_p2p_server(self):
