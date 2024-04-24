@@ -303,6 +303,7 @@ class Peer:
 
         if message.get("type") == "hello":
             logging.info(f"Received handshake from {addr}")
+
             # Acknowledge the handshake
             ack_message = {
                 "type": "ack",
@@ -313,19 +314,30 @@ class Peer:
             await writer.drain()
             logging.info(f"Handshake acknowledged to {addr}")
 
+            # Add or update the peer's information in the peers list
+            peer_host, _ = addr
+            if peer_port := message.get('listening_port'):
+                peer_info = f"{peer_host}:{peer_port}"
+                if peer_info not in self.peers:
+                    self.peers[peer_info] = int(time.time())
+                    logging.info(f"Added new peer {peer_info}.")
+                    await self.rewrite_peers_file()
+            else:
+                logging.error("No listening port provided in handshake message.")
+
         elif message.get("type") == "request_peer_list":
             logging.info(f"Peer list requested by {addr}")
             # Send the peer list
             await self.send_peer_list(writer)
 
         elif message.get("type") == "heartbeat":
-            await self.respond_to_heartbeat(writer, message) 
+            await self.respond_to_heartbeat(writer, message)
 
         elif message.get("type") == "peer_list":
             logging.info(f"Received peer list from {addr}")
             if new_peers := message.get("payload", []):
                 logging.info("Processing and updating with new peer list...")
-                await self.update_peers(new_peers)  # Directly call update_peers here
+                await self.update_peers(new_peers)
             else:
                 logging.warning("Received empty peer list.")
 
