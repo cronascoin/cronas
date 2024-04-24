@@ -288,12 +288,11 @@ class Peer:
             async with aiofiles.open("peers.dat", "r") as f:
                 async for line in f:
                     try:
-                        peer, port, last_seen_str = line.strip().split(":")
-                        last_seen = int(last_seen_str)
-                        logging.debug(f"Loaded timestamp: {last_seen}, type: {type(last_seen)}")
-                        self.peers[peer] = last_seen
+                        peer_info, last_seen_str = line.strip().split(":")  # Split into IP:port and timestamp
+                        last_seen = int(last_seen_str) if last_seen_str != 'None' else None  
+                        self.peers[peer_info] = last_seen
                     except ValueError as e:
-                        logging.info(f"error:{e}")
+                        logging.warning(f"Invalid line in peers.dat: {line} - Error: {e}")
         else:
             # Initialize peers from seeds and save to file
             for seed in self.seeds:
@@ -396,20 +395,21 @@ class Peer:
         """Rewrites the peers.dat file, ensuring uniqueness and optionally batching updates."""
         try:
             peers_to_write = self.peers.copy()  
-
+            
             if include_new_peers:
-                peers_to_write.update(self.new_peers)  # Combine peers
-                self.new_peers.clear()  # Clear after the update
-
+                peers_to_write.update(self.new_peers)  
+                self.new_peers.clear()  
+            
             async with aiofiles.open("peers.dat", "w") as f:
-                for peer, last_seen in peers_to_write.items():  
-                    await f.write(f"{peer}:{last_seen}\n")
+                for peer_info, last_seen in peers_to_write.items():  
+                    await f.write(f"{peer_info}:{last_seen or 'None'}\n") 
 
             logging.info("Peers file rewritten successfully.")  
         except IOError as e:
             logging.error(f"Failed to write to peers.dat: {e}")
         except Exception as e:
             logging.error(f"Failed to rewrite peers.dat: {e}\n{traceback.format_exc()}")
+
 
 
     async def send_heartbeat(self, writer):
