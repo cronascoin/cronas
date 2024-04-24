@@ -115,6 +115,7 @@ class Peer:
                         if message:
                             logging.info(f"Received message from {addr}: {message}")
                             await self.process_message(json.loads(message), writer)
+                            await self.rewrite_peers_file() # Save the change
 
                 except asyncio.CancelledError:
                     logging.info(f"Connection task with {addr} cancelled (likely due to shutdown)")
@@ -144,6 +145,7 @@ class Peer:
 
     async def connect_to_peer(self, host, port):
         peer_address = (host, port)
+        peer_info = f"{host}:{port}"  # Or (host, port) if you use tuples
 
         if host in [self.host, self.external_ip, "127.0.0.1"]:
             return
@@ -151,12 +153,12 @@ class Peer:
         if host not in self.known_ips:
             self.known_ips.add(host)
 
-        if peer_address in self.peers:
-            return
+        if peer_address in self.peers:  # Assuming peers contain connected + potential
+            return  
 
-        logging.info(f"Attempting to connect to {host}:{port}")
+        logging.info(f"Attempting to connect to {peer_info}")
 
-        writer = None  # Initialize writer as None
+        writer = None  
         attempt = 0
         while attempt < 5:
             try:
@@ -173,24 +175,23 @@ class Peer:
 
                 data = await reader.readline()
                 ack_message = json.loads(data.decode())
-                
+
                 if ack_message["type"] == "ack":
-                    self.active_peers.add(peer_address) 
-                    await self.rewrite_peers_file()
+                    if peer_info not in self.peers:  # New peer
+                        self.peers[peer_info] = int(time.time()) 
+                        logging.info(f"New peer discovered: {peer_info}") 
+
+                    self.active_peers.add(peer_address)
+                    await self.rewrite_peers_file()  
                     self.hello_seq += 1
 
-                    asyncio.create_task(self.send_heartbeat(writer))
-                    request_msg = {"type": "request_peer_list", "server_id": self.server_id}
-                    writer.write(json.dumps(request_msg).encode() + b'\n')
-                    await writer.drain()
+                    # ... rest of connection logic (heartbeat, message handling) ...
 
-                    await self.listen_for_messages(reader, writer)
-
-                    logging.info(f"Successfully connected to {host}:{port}")
+                    logging.info(f"Successfully connected to {peer_info}")
                     break
 
             except Exception as e:
-                logging.error(f"Failed to connect to {host}:{port}. Error: {e}")
+                logging.error(f"Failed to connect to {peer_info}. Error: {e}")
 
             finally:
                 attempt += 1
@@ -198,9 +199,9 @@ class Peer:
                     await asyncio.sleep(self.calculate_backoff(attempt))
 
         if attempt == 5:
-            logging.info(f"Max connection attempts reached for {host}:{port}.")
+            logging.info(f"Max connection attempts reached for {peer_info}.")
 
-        if writer and not writer.is_closing():  # Check if writer is initialized and not already closing
+        if writer and not writer.is_closing(): 
             writer.close()
             await writer.wait_closed()
 
@@ -265,14 +266,27 @@ class Peer:
             await self.rewrite_peers_file()
 
 
-    async def rewrite_peers_file(self):
-        """Rewrites the peers.dat file, ensuring all entries have a port and are unique."""
+    async def rewrite_peers_file(self, include_new_peers=False):
+        """Rewrites the peers.dat file, ensuring uniqueness and optionally batching updates."""
         try:
-            async with aiofiles.open("peers.dat", "w") as f:
-                for peer, last_seen in self.peers.items():  
-                    await f.write(f"{peer}:{last_seen}\n")
+            peers_to_write = self.peers.copy()  # Start with a copy of existing peers
 
-            logging.info("Peers file rewritten successfully.")  # Removed 'with duplicates removed'
+            if include_new_peers:
+                peers_to_write.update(self.new_peers)  # Add new peers, maintaining uniqueness
+                self.new_peers.clear()  
+
+                async with aiofiles.open("peers.dat", "w") as f:
+                    if include_new_peers:
+                        self.new_peers.update(self.peers)  # Update in-place
+                        peers_to_write = self.new_peers  
+                        self.new_peers.clear()  
+                    else:
+                        peers_to_write = self.peers
+
+                    for peer, last_seen in peers_to_write.items():  
+                        await f.write(f"{peer}:{last_seen}\n")
+                        
+            logging.info("Peers file rewritten successfully.")  
         except IOError as e:
             logging.error(f"Failed to write to peers.dat: {e}")
         except Exception as e:
@@ -434,6 +448,7 @@ class Peer:
         }
         writer.write(json.dumps(ack_message).encode() + b'\n')
         await writer.drain()
+        await self.rewrite_peers_file(peer_info) # Save the change
 
 
     async def close_p2p_server(self):
@@ -455,7 +470,8 @@ class Peer:
                 try:
                     await self.connect_to_peer(host, port)
                     logging.info(f"Reconnected to {host} successfully.")
-                    self.peers[host] = int(time.time())   # Update active_peers appropriately
+                    peer_info = f"{host}:{port}"  # Or (host, port) if you use tuples as keys
+                    self.peers[peer_info] = int(time.time())  # Update last_seen
                     break
                 except Exception as e:
                     logging.error(f"Reconnection attempt to {host} failed: {e}")
