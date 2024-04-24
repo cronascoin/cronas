@@ -51,6 +51,9 @@ async def main():
         # Catching CancelledError to handle asyncio task cancellations
         logging.info("CancelledError caught, shutting down.")
         await shutdown(peer, rpc_server)
+    except KeyboardInterrupt:
+        logging.info("Received KeyboardInterrupt. Initiating shutdown...")
+        await shutdown(peer, rpc_server) # Assuming you have a shutdown function
     except Exception as e:
         # General exception catch to handle unexpected errors
         logging.error(f"An unexpected error occurred: {e}")
