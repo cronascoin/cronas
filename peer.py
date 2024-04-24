@@ -288,7 +288,8 @@ class Peer:
             async with aiofiles.open("peers.dat", "r") as f:
                 async for line in f:
                     try:
-                        peer_info, last_seen_str = line.strip().split(":")  # Split into IP:port and timestamp
+                        peer, port, last_seen_str = line.strip().split(":")  # Split into IP:port and timestamp
+                        peer_info = str(peer + ":" + port)
                         last_seen = int(last_seen_str) if last_seen_str != 'None' else None  
                         self.peers[peer_info] = last_seen
                     except ValueError as e:
