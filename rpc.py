@@ -38,8 +38,7 @@ class RPCServer:
     async def add_node(self, request):
         # Example implementation of adding a node
         data = await request.json()  # Extract JSON data from the request
-        ip = data.get('ip')
-        if ip:
+        if ip := data.get('ip'):
             # Assuming peer has an add_peer method to add a new node
             self.peer.add_peer(ip)
             return web.Response(text=json.dumps({"message": "Node added successfully"}), content_type='application/json')

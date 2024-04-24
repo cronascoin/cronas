@@ -6,6 +6,7 @@
         "cooldown",
         "DGRAM",
         "EADDRINUSE",
-        "peername"
+        "peername",
+        "socketname"
     ]
 }

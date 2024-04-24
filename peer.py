@@ -300,8 +300,8 @@ class Peer:
                 async for line in f:
                     try:
                         peer, port, last_seen_str = line.strip().split(":")  # Split into IP:port and timestamp
-                        peer_info = str(peer + ":" + port)
-                        last_seen = int(last_seen_str) if last_seen_str != 'None' else None  
+                        peer_info = str(f"{peer}:{port}")
+                        last_seen = int(last_seen_str) if last_seen_str != 'None' else None
                         self.peers[peer_info] = last_seen
                     except ValueError as e:
                         logging.warning(f"Invalid line in peers.dat: {line} - Error: {e}")
