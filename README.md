@@ -1,4 +1,4 @@
-# Cronas Server
+# Cronas P2P Node
 
 ## This is the Cronas Coin full node wallet.
 
