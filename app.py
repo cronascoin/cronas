@@ -6,6 +6,7 @@ import contextlib
 import logging
 from peer import Peer
 from rpc import RPCServer
+
  
 logging.basicConfig(level=logging.INFO)
 
@@ -33,9 +34,12 @@ async def main():
     p2p_port = 4333
     rpc_port = 4334
     seeds = ['137.184.80.215:4333']  # Assuming seeds include port information
+    version = '0.0.1'
     
     # Create and initialize the Peer object
-    peer = Peer(p2p_host, p2p_port, seeds)
+    #peer = Peer(p2p_host, p2p_port, seeds, version)
+    peer = Peer(p2p_host, p2p_port, seeds, version)
+
     await peer.async_init()  # Ensures the Peer object is fully initialized before proceeding
     
     # Initialize the RPC server with the already initialized Peer object

@@ -14,11 +14,12 @@ import traceback
 import time
 import re
 import requests
+import pickle
 
 logging.basicConfig(level=logging.INFO)
 
 class Peer:
-    def __init__(self, host, p2p_port, seeds=None):
+    def __init__(self, host, p2p_port, seeds=None, version=None):
         self.server_id = str(uuid.uuid4())
         self.host = host
         self.p2p_port = p2p_port
@@ -35,11 +36,37 @@ class Peer:
         self.known_ips = set()
         self.connected_peers = set()
         self.new_peers = []
-        
+        self.version = version
+        self.file_lock = asyncio.Lock()  # Initialize the asyncio lock
+        self.file_write_scheduled = False
+        self.pending_file_write = False
+        self.file_write_delay = 10  # Delay in seconds before writing to the file
+
+
+    async def actual_rewrite(self, include_new_peers):
+        """Performs the actual rewrite of the peers.dat file."""
+        async with self.file_lock:  # Ensure only one coroutine writes to the file at a time
+            try:
+                peers_to_write = self.peers.copy()
+                if include_new_peers:
+                    peers_to_write.update(self.new_peers)
+                    self.new_peers.clear()
+
+                async with aiofiles.open("peers.dat", "w") as f:
+                    for peer_info, last_seen in peers_to_write.items():
+                        await f.write(f"{peer_info}:{last_seen or 'None'}\n")
+                logging.info("Peers file rewritten successfully.")
+            except IOError as e:
+                logging.error(f"Failed to write to peers.dat: {e}")
+            except Exception as e:
+                logging.error(f"Failed to rewrite peers.dat: {e}\n{traceback.format_exc()}")
+
 
     async def async_init(self):
         await self.load_peers()
         await self.connect_to_known_peers()
+        # Start the periodic saving every 60 seconds (1 minute)
+        asyncio.create_task(self.periodic_save_peers())
 
     def calculate_backoff(self, attempt):
         """Calculates the backoff time with jitter."""
@@ -329,6 +356,17 @@ class Peer:
         logging.info("Peers loaded from file or initialized from seeds.")
 
 
+    async def periodic_save_peers(self, interval=60):
+        """Periodically saves the peers list to a file."""
+        while True:
+            try:
+                await self.rewrite_peers_file()
+                logging.info("Peers list saved successfully.")
+            except Exception as e:
+                logging.error(f"Failed to save peers list: {e}")
+            await asyncio.sleep(interval)  # Wait for the specified interval (default is 60 seconds).
+
+
     def parse_address(self):
         if match := re.match(r"^(?:(\[[\d:a-fA-F]+\])|([\d\.]+)):(\d+)$", self):
             ip = match[1] or match[2]
@@ -438,22 +476,24 @@ class Peer:
 
     async def rewrite_peers_file(self, include_new_peers=False):
         """Rewrites the peers.dat file, ensuring uniqueness and optionally batching updates."""
-        try:
-            peers_to_write = self.peers.copy()  
-            
-            if include_new_peers:
-                peers_to_write.update(self.new_peers)  
-                self.new_peers.clear()  
-            
-            async with aiofiles.open("peers.dat", "w") as f:
-                for peer_info, last_seen in peers_to_write.items():  
-                    await f.write(f"{peer_info}:{last_seen or 'None'}\n") 
+        if not self.file_write_scheduled:
+            self.file_write_scheduled = True
+            self.pending_file_write = False
+            await asyncio.sleep(self.file_write_delay)  # Wait for the specified delay
+            if self.pending_file_write:  # Check if any updates occurred during the wait
+                await self.rewrite_peers_file(include_new_peers)  # Reinvoke to include latest updates
+            else:
+                await self.actual_rewrite(include_new_peers)  # Perform the actual file writing
+            self.file_write_scheduled = False
+        else:
+            self.pending_file_write = True  # Mark that there was an attempt to write during the delay
 
-            logging.info("Peers file rewritten successfully.")  
-        except IOError as e:
-            logging.error(f"Failed to write to peers.dat: {e}")
-        except Exception as e:
-            logging.error(f"Failed to rewrite peers.dat: {e}\n{traceback.format_exc()}")
+
+    def save_peers_to_file(self, filename="peers.dat"):
+        with open(filename, "wb") as file:
+            pickle.dump(self.peers, file)
+            print("Peers saved to file.")
+            
 
 
     async def send_heartbeat(self, writer):
@@ -509,7 +549,7 @@ class Peer:
                 reuse_address=True  # Enable SO_REUSEADDR
             )
             self.p2p_server = server  # Set the server object before logging or any operations
-            logging.info(f"P2P server {self.server_id} listening on {self.host}:{self.p2p_port}")
+            logging.info(f"P2P server version {self.version} with ID {self.server_id} listening on {self.host}:{self.p2p_port}")
             async with server:
                 await server.serve_forever()
 
