@@ -378,6 +378,7 @@ class Peer:
 
     async def process_message(self, message, writer):
         addr = writer.get_extra_info('peername')
+        self.update_last_seen(f"{addr[0]}:{addr[1]}")
         logging.info(f"Received message from {addr}: {message}")
 
         if message.get("type") == "hello":
@@ -474,19 +475,25 @@ class Peer:
         await self.rewrite_peers_file(peer_info) # Save the change
 
 
-    async def rewrite_peers_file(self, include_new_peers=False):
-        """Rewrites the peers.dat file, ensuring uniqueness and optionally batching updates."""
-        if not self.file_write_scheduled:
-            self.file_write_scheduled = True
-            self.pending_file_write = False
-            await asyncio.sleep(self.file_write_delay)  # Wait for the specified delay
-            if self.pending_file_write:  # Check if any updates occurred during the wait
-                await self.rewrite_peers_file(include_new_peers)  # Reinvoke to include latest updates
-            else:
-                await self.actual_rewrite(include_new_peers)  # Perform the actual file writing
-            self.file_write_scheduled = False
-        else:
-            self.pending_file_write = True  # Mark that there was an attempt to write during the delay
+    async def rewrite_peers_file(self):
+        """Rewrites the peers.dat file, ensuring uniqueness."""
+        async with self.file_lock:  # Ensure only one coroutine writes to the file at a time
+            try:
+                peers_to_write = self.peers.copy()
+
+                async with aiofiles.open("peers.dat", "w") as f:
+                    for peer_info, last_seen in peers_to_write.items():
+                        await f.write(f"{peer_info}:{last_seen or 'None'}\n")
+
+                logging.info("Peers file rewritten successfully.")
+                if self.pending_file_write:
+                    self.pending_file_write = False  # Reset the flag
+                    await asyncio.sleep(self.file_write_delay)  # Additional delay for any pending updates
+                    await self.rewrite_peers_file()  # Recursive call to handle any additional updates
+            except IOError as e:
+                logging.error(f"Failed to write to peers.dat: {e}")
+            except Exception as e:
+                logging.error(f"Failed to rewrite peers.dat: {e}\n{traceback.format_exc()}")
 
 
     def save_peers_to_file(self, filename="peers.dat"):
@@ -494,6 +501,15 @@ class Peer:
             pickle.dump(self.peers, file)
             print("Peers saved to file.")
             
+    async def schedule_rewrite(self):
+        """Schedule a delayed rewrite of the peers file."""
+        if not self.file_write_scheduled:
+            self.file_write_scheduled = True
+            await asyncio.sleep(self.file_write_delay)  # Delay before actually writing
+            await self.rewrite_peers_file()
+            self.file_write_scheduled = False
+        else:
+            self.pending_file_write = True  # Indicates more updates have been made during the delay
 
 
     async def send_heartbeat(self, writer):
@@ -562,6 +578,11 @@ class Peer:
         except Exception as e:
             logging.error(f"Error starting P2P server: {e}")
             await self.close_p2p_server()
+
+    def update_last_seen(self, peer_info):
+        """Update the last seen time for a given peer."""
+        self.peers[peer_info] = int(time.time())
+        self.schedule_rewrite()  # Schedule a rewrite after updating
 
 
     async def update_peers(self, new_peers):
