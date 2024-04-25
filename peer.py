@@ -37,6 +37,7 @@ class Peer:
 
     async def async_init(self):
         await self.load_peers()
+        await self.connect_to_known_peers()
 
     def calculate_backoff(self, attempt):
         """Calculates the backoff time with jitter."""
@@ -67,7 +68,9 @@ class Peer:
         for peer_address in self.peers.keys():
             host, port = peer_address.split(':')  # Assuming peer_address is in the form 'host:port'
             port = int(port)  # Convert port to an integer
-
+            
+            if host in [self.host, self.external_ip, "127.0.0.1"]:
+                return
             # Check if the peer is the local machine by comparing host and port
             if host in [self.host, "127.0.0.1"] and port == self.p2p_port:
                 logging.info(f"Skipping connection to self at {host}:{port}")
@@ -89,13 +92,15 @@ class Peer:
         logging.info("Completed attempts to connect to all known peers.")
 
 
-
     async def connect_to_new_peers(self, new_peers):
         """Attempt to connect to new peers not currently being connected to."""
         for peer_info in new_peers:
             host, port = peer_info.split(':')  # Splitting into host and port
             port = int(port)  # Ensuring port is an integer
 
+            if host in [self.host, self.external_ip, "127.0.0.1"]:
+                return
+            
             # Check if the peer is the node itself or if it's already in the list of active or connecting peers
             if (host == self.external_ip and port == self.p2p_port) or (peer_info in self.peers):
                 logging.info(f"Skipping connection to {host}:{port} as it is self or already connected.")
