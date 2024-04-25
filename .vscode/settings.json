@@ -8,6 +8,8 @@
         "DGRAM",
         "EADDRINUSE",
         "peername",
+        "REUSEADDR",
+        "REUSEPORT",
         "socketname"
     ]
 }

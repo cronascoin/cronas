@@ -13,6 +13,7 @@ import aiofiles
 import traceback
 import time
 import re
+import requests
 
 logging.basicConfig(level=logging.INFO)
 
@@ -25,6 +26,7 @@ class Peer:
         self.active_peers = set()  # Initialize active_peers
         self.seeds = seeds
         self.external_ip = self.detect_ip_address()
+        self.out_ip = self.detect_out_ip()
         self.hello_seq = 0  # Initialize the hello_seq attribute here
         self.reconnect_delay = 5  # seconds
         self.retry_attempts = {}  # Map: peer_identifier -> (last_attempt_time, attempt_count)
@@ -69,12 +71,8 @@ class Peer:
             host, port = peer_address.split(':')  # Assuming peer_address is in the form 'host:port'
             port = int(port)  # Convert port to an integer
             
-            if host in [self.host, self.external_ip, "127.0.0.1"]:
+            if host in [self.host, self.external_ip, self.out_ip, "127.0.0.1"]:
                 return
-            # Check if the peer is the local machine by comparing host and port
-            if host in [self.host, "127.0.0.1"] and port == self.p2p_port:
-                logging.info(f"Skipping connection to self at {host}:{port}")
-                continue
 
             # Proceed with the connection attempt
             task = asyncio.create_task(self.connect_to_peer(host, port))
@@ -98,8 +96,8 @@ class Peer:
             host, port = peer_info.split(':')  # Splitting into host and port
             port = int(port)  # Ensuring port is an integer
 
-            if host in [self.host, self.external_ip, "127.0.0.1"]:
-                return
+            #if host in [self.host, self.external_ip, self.out_ip, "127.0.0.1"]:
+            #    return
             
             # Check if the peer is the node itself or if it's already in the list of active or connecting peers
             if (host == self.external_ip and port == self.p2p_port) or (peer_info in self.peers):
@@ -113,10 +111,9 @@ class Peer:
             asyncio.create_task(self.connect_to_peer(host, port))
 
 
-
     async def connect_to_peer(self, host, port):
         peer_info = f"{host}:{port}"
-        if host in [self.host, self.external_ip, "127.0.0.1"]:
+        if host in [self.host, self.external_ip, self.out_ip, "127.0.0.1"]:
             return
 
         logging.info(f"Attempting to connect to {peer_info}")
@@ -187,6 +184,15 @@ class Peer:
                 # Get the socket's own address
                 ip = s.getsockname()[0]
             return ip
+        except Exception as e:
+            logging.info(f"Failed to detect external IP address: {e}")
+            return '127.0.0.1'
+        
+        
+    def detect_out_ip(self):
+        try:
+            response = requests.get('https://api.ipify.org?format=json')
+            return response.json()['ip']
         except Exception as e:
             logging.info(f"Failed to detect external IP address: {e}")
             return '127.0.0.1'
@@ -278,6 +284,7 @@ class Peer:
 
     async def listen_for_messages(self, reader, writer):
         addr = writer.get_extra_info('peername')
+        peer_info = f"{addr[0]}:{addr[1]}"  # Format peer_info as 'host:port'
         logging.info(f"Listening for messages from {addr}")
         try:
             while True:
@@ -286,14 +293,19 @@ class Peer:
                     logging.info("Connection closed by peer.")
                     break
                 message = json.loads(data_buffer.decode().strip())
+                self.peers[peer_info] = int(time.time())  # Update last_seen timestamp
                 await self.process_message(message, writer)
+                await self.rewrite_peers_file()  # Update peers.dat file after processing each message
         except asyncio.IncompleteReadError:
             logging.info("Incomplete read error, reconnecting...")
-            asyncio.create_task(self.reconnect_to_peer(writer.get_extra_info('peername')))
+            asyncio.create_task(self.reconnect_to_peer(addr))
         except Exception as e:
             logging.error(f"Error during communication with {addr}: {e}")
         finally:
             logging.info(f"Closing connection with {addr}")
+            if peer_info in self.peers:  # Confirm peer is still tracked
+                self.peers[peer_info] = int(time.time())  # Final update on connection close
+                #await self.rewrite_peers_file()  # Final rewrite to ensure all data is up-to-date
             writer.close()
             await writer.wait_closed()
 
@@ -489,18 +501,17 @@ class Peer:
 
 
     async def start_p2p_server(self):
-        """Start the P2P server and handle any startup errors."""
+        """Start the P2P server and handle any startup errors, with address reuse."""
         try:
-            # Check if the port is available (additional pre-check)
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind((self.host, self.p2p_port))
-                s.close()
-            
-            self.p2p_server = await asyncio.start_server(
-                self.handle_peer_connection, self.host, self.p2p_port)
+            # Ensure the server uses reuse_address only
+            server = await asyncio.start_server(
+                self.handle_peer_connection, self.host, self.p2p_port,
+                reuse_address=True  # Enable SO_REUSEADDR
+            )
+            self.p2p_server = server  # Set the server object before logging or any operations
             logging.info(f"P2P server {self.server_id} listening on {self.host}:{self.p2p_port}")
-            async with self.p2p_server:
-                await self.p2p_server.serve_forever()
+            async with server:
+                await server.serve_forever()
 
         except OSError as e:
             logging.error(f"Failed to start server on {self.host}:{self.p2p_port}: {e}")
@@ -513,14 +524,18 @@ class Peer:
             await self.close_p2p_server()
 
 
-
     async def update_peers(self, new_peers):
         updated = False
         for peer in new_peers:
-            if peer not in self.peers and peer != self.external_ip:
-                self.peers[peer] = None 
-                logging.info(f"Peer {peer} added to the list.")
-                updated = True
+            if ':' in peer:  # Ensure the format includes an IP and port
+                ip, port = peer.split(':')
+                if ip == self.out_ip:
+                    logging.info(f"Skipping addition of own external IP {peer} to peer list.")
+                    continue
+                if peer not in self.peers:
+                    self.peers[peer] = int(time.time())  # Update last seen to current time
+                    logging.info(f"Peer {peer} added to the list.")
+                    updated = True
         if updated:
             await self.rewrite_peers_file()
             logging.info("Peers file updated successfully.")
