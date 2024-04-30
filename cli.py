@@ -38,9 +38,8 @@ def add_node(ip):
 def main():
     if len(sys.argv) < 2:
         print("Usage:")
-        print("  cli.py peers")
-        print("  cli.py transaction <sender> <receiver> <amount>")
         print("  cli.py addnode <ip>")
+        print("  cli.py peers")
         return
     
     command = sys.argv[1]

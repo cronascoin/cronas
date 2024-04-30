@@ -17,8 +17,8 @@ class RPCServer:
     async def start_rpc_server(self):
         app = web.Application()
         app.add_routes([
-            web.get('/peers', self.get_peers),
-            web.post('/addnode', self.add_node)  # Register the route for adding a node
+            web.post('/addnode', self.add_node),  # Register the route for adding a node
+            web.get('/peers', self.get_peers)
         ])
         self.runner = web.AppRunner(app)  # Use instance variable
         await self.runner.setup()
