@@ -609,9 +609,8 @@ class Peer:
                 if peer_info not in self.peers:
                     self.peers[peer_info] = int(time.time())  # Update last seen to current time
                     logging.info(f"Peer {peer_info} added to the list.")
-                    self.mark_peer_changed()
+                    updated = True
 
         if updated:
             self.mark_peer_changed()
             await self.rewrite_peers_file()  # Save changes if any valid new peers were added
-            logging.info("Peers file updated successfully.")
