@@ -359,6 +359,8 @@ class Peer:
             if seed not in self.peers:
                 self.peers[seed] = int(time.time())  # Use current time for last seen
                 loaded_peers_count += 1  # Count seed as loaded if it was added
+                self.mark_peer_changed()  # This marks the peers list as changed
+
 
         # Save the updated peers list back to the file, creating it if necessary
         await self.rewrite_peers_file()
@@ -417,6 +419,7 @@ class Peer:
             logging.info(f"Received peer list from {peer_info}")
             if new_peers := message.get("payload", []):
                 logging.info("Processing and updating with new peer list...")
+                self.mark_peer_changed()
                 await self.update_peers(new_peers)
             else:
                 logging.warning("Received empty peer list.")
@@ -498,10 +501,11 @@ class Peer:
                 valid_peers = {peer_info: last_seen for peer_info, last_seen in self.peers.items() if self.is_valid_peer(peer_info)}
                 async with aiofiles.open("peers.dat", "w") as f:
                     for peer_info, last_seen in valid_peers.items():
-                        await f.write(f"{peer_info}:{last_seen or 'None'}\n")
-
+                        await f.write(f"{peer_info}:{last_seen}\n")
                 self.peers_changed = False  # Reset change flag after writing
                 logging.info("Peers file rewritten successfully.")
+            except OSError as e:
+                logging.error(f"Failed to open peers.dat: {e}")
             except Exception as e:
                 logging.error(f"Failed to rewrite peers.dat: {e}")
 
@@ -608,5 +612,6 @@ class Peer:
                     self.mark_peer_changed()
 
         if updated:
+            self.mark_peer_changed()
             await self.rewrite_peers_file()  # Save changes if any valid new peers were added
             logging.info("Peers file updated successfully.")
