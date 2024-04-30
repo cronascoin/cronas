@@ -56,7 +56,6 @@ async def main():
 
     peer = Peer('0.0.0.0', p2p_port, [addnode], server_id, version)
     rpc_server = RPCServer(peer, '127.0.0.1', rpc_port)
-    #await peer.async_init()  # Ensures the Peer object is fully initialized before proceeding
 
 
     await asyncio.gather(
