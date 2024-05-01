@@ -38,6 +38,8 @@ class Peer:
         self.file_write_delay = 10  # Delay in seconds before 
         self.peers_changed = False
         self.connections = {}  # Dictionary to track connections
+        self.shutdown_flag = False  # Initialize the shutdown flag
+
 
 
     async def add_peer(self, peer_info):
@@ -50,18 +52,22 @@ class Peer:
         await self.rewrite_peers_file()  # Directly rewrite the file after updating peers
 
 
-    def calculate_backoff(self, attempt):
+    async def calculate_backoff(self, attempt):
         """Calculates the backoff time with escalating delays."""
-        if attempt == 1:
-            return 3600  # 1 hour
-        elif attempt == 2:
-            return 86400  # 1 day
-        elif attempt == 3:
-            return 604800  # 1 week
-        elif attempt >= 4:
-            return 2592000  # 1 month
-        else:
-            return 60  # Default backoff for any other cases, e.g., 0 attempts
+        try:
+            if attempt == 1:
+                return 3600  # 1 hour
+            elif attempt == 2:
+                return 86400  # 1 day
+            elif attempt == 3:
+                return 604800  # 1 week
+            elif attempt >= 4:
+                return 2592000  # 1 month
+            else:
+                return 60  # Default backoff for any other cases, e.g., 0 attempts
+        except asyncio.CancelledError:
+            # Gracefully handle cancellation by raising it again
+            raise
 
 
     async def cancel_heartbeat_tasks(self):
@@ -124,7 +130,6 @@ class Peer:
 
 
     async def connect_to_peer(self, host, port):
-        # sourcery skip: low-code-quality
         peer_info = f"{host}:{port}"
         if host in [self.host, self.external_ip, self.out_ip, "127.0.0.1"]:
             return
@@ -133,7 +138,7 @@ class Peer:
         writer = None
         successful_connection = False
         attempt = 0
-        while attempt < 5:
+        while not self.shutdown_flag and attempt < 5:
             try:
                 reader, writer = await asyncio.open_connection(host, port)
                 handshake_msg = {
@@ -149,7 +154,10 @@ class Peer:
                 data = await reader.readline()
                 if not data:
                     logging.error("No data received in response to handshake.")
-                    break
+                    attempt += 1
+                    await asyncio.sleep(await self.calculate_backoff(attempt))
+                    continue
+                
                 ack_message = json.loads(data.decode())
                 if ack_message.get("type") == "ack":
                     remote_server_id = ack_message["server_id"]
@@ -175,17 +183,21 @@ class Peer:
                     successful_connection = True
                     break
 
-            except (asyncio.TimeoutError, json.JSONDecodeError, Exception) as e:
+            except asyncio.TimeoutError:
+                logging.error(f"Timeout error while attempting to connect to {peer_info}.")
+                attempt += 1
+                await asyncio.sleep(await self.calculate_backoff(attempt))
+            except json.JSONDecodeError as e:
+                logging.error(f"JSON decoding error while processing data from {peer_info}: {e}")
+                break
+            except Exception as e:
                 logging.error(f"Error while connecting to {peer_info}: {e}")
+                break
 
             finally:
-                if not successful_connection and writer and not writer.is_closing():
+                if not successful_connection and writer is not None and not writer.is_closing():
                     writer.close()
                     await writer.wait_closed()
-
-                attempt += 1
-                if attempt < 5:
-                    await asyncio.sleep(self.calculate_backoff(attempt))
 
         if attempt == 5:
             logging.info(f"Max connection attempts reached for {peer_info}.")
