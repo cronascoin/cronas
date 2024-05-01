@@ -559,15 +559,30 @@ class Peer:
 
 
     async def send_peer_list(self, writer):
+        # Initialize an empty list to store peer data
+        peer_list = []
+        
+        # Read the peers from the peers.dat file
+        async with aiofiles.open("peers.dat", "r") as f:
+            async for line in f:
+                if line.strip():  # Ensure the line is not empty
+                    parts = line.strip().split(':')
+                    if len(parts) >= 2:  # Basic validation to check format
+                        ip_port = f"{parts[0]}:{parts[1]}"  # Recreate the IP:port format
+                        peer_list.append(ip_port)
+
+        # Prepare the message containing the peer list
         peer_list_message = {
             "type": "peer_list",
-            "payload": list(self.peers),
+            "payload": peer_list,
             "server_id": self.server_id,
         }
+
+        # Serialize the peer data to JSON and send it
         writer.write(json.dumps(peer_list_message).encode() + b'\n')
         await writer.drain()
-        logging.info("Sent peer list to a peer.")
-        # Do not close the writer or break the loop here
+        logging.info("Sent sanitized peer list from peers.dat to a peer.")
+
 
 
     async def start_p2p_server(self):
