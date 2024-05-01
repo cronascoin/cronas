@@ -12,6 +12,7 @@
         "peername",
         "REUSEADDR",
         "REUSEPORT",
-        "socketname"
+        "socketname",
+        "sourcery"
     ]
 }

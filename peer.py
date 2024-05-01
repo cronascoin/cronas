@@ -42,13 +42,13 @@ class Peer:
 
 
     async def add_peer(self, peer_info):
-        """Adds a peer or updates an existing one without additional validation."""
+        """Adds a peer or updates an existing one without additional validation, and writes to file."""
         if peer_info in self.peers:
             logging.info(f"Updated last seen for peer: {peer_info}")
         else:
             logging.info(f"Added new peer: {peer_info}")
         self.peers[peer_info] = int(time.time())  # Add/update with current timestamp as last seen
-        self.mark_peer_changed()  # Mark that peers list has been changed
+        await self.rewrite_peers_file()  # Directly rewrite the file after updating peers
 
 
     def calculate_backoff(self, attempt):
@@ -116,6 +116,7 @@ class Peer:
 
 
     async def connect_to_peer(self, host, port):
+        # sourcery skip: low-code-quality
         peer_info = f"{host}:{port}"
         if host in [self.host, self.external_ip, self.out_ip, "127.0.0.1"]:
             return
@@ -528,11 +529,13 @@ class Peer:
         """Schedule a delayed rewrite of the peers file."""
         if not self.file_write_scheduled:
             self.file_write_scheduled = True
-            await asyncio.sleep(self.file_write_delay)  # Delay before actually writing
-            await self.rewrite_peers_file()
-            self.file_write_scheduled = False
+            while self.pending_file_write:
+                self.pending_file_write = False  # Reset pending flag
+                await asyncio.sleep(self.file_write_delay)  # Delay before actually writing
+            await self.rewrite_peers_file()  # Perform the file writing
+            self.file_write_scheduled = False  # Reset the scheduled flag
         else:
-            self.pending_file_write = True  # Indicates more updates have been made during the delay
+            self.pending_file_write = True  # Set pending write flag if another write is scheduled
 
 
     async def send_heartbeat(self, writer):
