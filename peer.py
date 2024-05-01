@@ -25,7 +25,7 @@ class Peer:
         self.host = host
         self.p2p_port = p2p_port
         self.peers = {}  # Initialize as a dictionary
-        self.active_peers = set()  # Initialize active_peers
+        self.active_peers = {}  # Initialize as a dictionary
         self.seeds = seeds
         self.external_ip = self.detect_ip_address()
         self.out_ip = self.detect_out_ip()
@@ -38,6 +38,8 @@ class Peer:
         self.pending_file_write = False
         self.file_write_delay = 10  # Delay in seconds before 
         self.peers_changed = False
+        self.connections = {}  # Dictionary to track connections
+
 
     async def add_peer(self, peer_info):
         """Adds a peer or updates an existing one without additional validation."""
@@ -120,6 +122,7 @@ class Peer:
 
         logging.info(f"Attempting to connect to {peer_info}")
         writer = None
+        successful_connection = False
         attempt = 0
         while attempt < 5:
             try:
@@ -140,10 +143,17 @@ class Peer:
                     break
                 ack_message = json.loads(data.decode())
                 if ack_message.get("type") == "ack":
-                    self.peers[peer_info] = int(time.time())  # Update or add new peer
-                    self.active_peers.add((host, port))  # Correct place to add to active_peers
-                    logging.info(f"Connected and acknowledged by peer: {peer_info}")
-
+                    remote_server_id = ack_message["server_id"]
+                    if remote_server_id in self.active_peers:
+                        existing_host, existing_port = self.active_peers[remote_server_id]
+                        if (existing_host, existing_port) != (host, port):
+                            logging.info(f"Replacing old connection {existing_host}:{existing_port} with new connection {host}:{port} for server_id {remote_server_id}.")
+                            await self.close_connection(existing_host, existing_port)
+                    
+                    self.peers[peer_info] = int(time.time())
+                    self.active_peers[remote_server_id] = (host, port)
+                    logging.info(f"Connected and acknowledged by peer with server_id {remote_server_id}: {peer_info}")
+                    
                     asyncio.create_task(self.send_heartbeat(writer))
                     request_msg = {"type": "request_peer_list", "server_id": self.server_id}
                     writer.write(json.dumps(request_msg).encode() + b'\n')
@@ -153,17 +163,17 @@ class Peer:
 
                     self.hello_seq += 1
                     logging.info(f"Successfully connected to {peer_info}")
+                    successful_connection = True
                     break
 
             except (asyncio.TimeoutError, json.JSONDecodeError, Exception) as e:
                 logging.error(f"Error while connecting to {peer_info}: {e}")
 
             finally:
-                if writer and not writer.is_closing():
+                if not successful_connection and writer and not writer.is_closing():
                     writer.close()
                     await writer.wait_closed()
-                if (host, port) in self.active_peers:
-                    self.active_peers.remove((host, port))  # Remove from active peers if the connection closes
+
                 attempt += 1
                 if attempt < 5:
                     await asyncio.sleep(self.calculate_backoff(attempt))
@@ -611,3 +621,13 @@ class Peer:
         if updated:
             self.mark_peer_changed()
             await self.rewrite_peers_file()  # Save changes if any valid new peers were added
+            
+    async def close_connection(self, host, port):
+        if (host, port) in self.connections:
+            _, writer = self.connections.pop((host, port))
+            if writer and not writer.is_closing():
+                writer.close()
+                await writer.wait_closed()
+            logging.info(f"Successfully closed connection to {host}:{port}")
+        else:
+            logging.info(f"No active connection found for {host}:{port} to close.")
