@@ -31,7 +31,6 @@ class Peer:
         self.out_ip = self.detect_out_ip()
         self.hello_seq = 0  # Initialize the hello_seq attribute here
         self.heartbeat_tasks = []  # Add this line to track heartbeat tasks
-        self.connected_peers = set()
         self.new_peers = []
         self.version = version
         self.file_lock = asyncio.Lock()  # Initialize the asyncio lock
@@ -129,7 +128,7 @@ class Peer:
                     "type": "hello",
                     "payload": f"Hello from {self.host}",
                     "seq": self.hello_seq + 1,
-                    "server_id": self.server_id,  
+                    "server_id": self.server_id,
                     "listening_port": self.p2p_port
                 }
                 writer.write(json.dumps(handshake_msg).encode() + b'\n')
@@ -142,8 +141,8 @@ class Peer:
                 ack_message = json.loads(data.decode())
                 if ack_message.get("type") == "ack":
                     self.peers[peer_info] = int(time.time())  # Update or add new peer
+                    self.active_peers.add((host, port))  # Correct place to add to active_peers
                     logging.info(f"Connected and acknowledged by peer: {peer_info}")
-                    self.active_peers.add((host, port))
 
                     asyncio.create_task(self.send_heartbeat(writer))
                     request_msg = {"type": "request_peer_list", "server_id": self.server_id}
@@ -156,17 +155,15 @@ class Peer:
                     logging.info(f"Successfully connected to {peer_info}")
                     break
 
-            except asyncio.TimeoutError as e:
-                logging.error(f"Timeout error while connecting to {peer_info}: {e}")
-            except json.JSONDecodeError as e:
-                logging.error(f"JSON decode error while processing handshake from {peer_info}: {e}")
-            except Exception as e:
-                logging.error(f"General error while connecting to {peer_info}: {e}")
+            except (asyncio.TimeoutError, json.JSONDecodeError, Exception) as e:
+                logging.error(f"Error while connecting to {peer_info}: {e}")
+
             finally:
                 if writer and not writer.is_closing():
                     writer.close()
                     await writer.wait_closed()
-
+                if (host, port) in self.active_peers:
+                    self.active_peers.remove((host, port))  # Remove from active peers if the connection closes
                 attempt += 1
                 if attempt < 5:
                     await asyncio.sleep(self.calculate_backoff(attempt))
