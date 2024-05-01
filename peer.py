@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import socket
-import random
 import aiofiles
 import time
 import re
@@ -52,8 +51,17 @@ class Peer:
 
 
     def calculate_backoff(self, attempt):
-        """Calculates the backoff time with jitter."""
-        return min(2 ** attempt + random.uniform(0, 1), 60)
+        """Calculates the backoff time with escalating delays."""
+        if attempt == 1:
+            return 3600  # 1 hour
+        elif attempt == 2:
+            return 86400  # 1 day
+        elif attempt == 3:
+            return 604800  # 1 week
+        elif attempt >= 4:
+            return 2592000  # 1 month
+        else:
+            return 60  # Default backoff for any other cases, e.g., 0 attempts
 
 
     async def cancel_heartbeat_tasks(self):
