@@ -39,17 +39,21 @@ class Peer:
         self.peers_changed = False
         self.connections = {}  # Dictionary to track connections
         self.shutdown_flag = False  # Initialize the shutdown flag
-
-
+        
 
     async def add_peer(self, peer_info):
-        """Adds a peer or updates an existing one without additional validation, and writes to file."""
+        host, port = peer_info.split(":")
+        if host in [self.host, self.external_ip, self.out_ip, "127.0.0.1", "localhost"]:
+            logging.info(f"Attempted to add self as peer: {peer_info}")
+            return False
+
         if peer_info in self.peers:
             logging.info(f"Updated last seen for peer: {peer_info}")
         else:
             logging.info(f"Added new peer: {peer_info}")
-        self.peers[peer_info] = int(time.time())  # Add/update with current timestamp as last seen
-        await self.rewrite_peers_file()  # Directly rewrite the file after updating peers
+        self.peers[peer_info] = int(time.time())
+        self.mark_peer_changed()
+        return True
 
 
     async def calculate_backoff(self, attempt):
@@ -171,6 +175,9 @@ class Peer:
                     self.active_peers[remote_server_id] = (host, port)
                     logging.info(f"Connected and acknowledged by peer with server_id {remote_server_id}: {peer_info}")
                     
+                    # Rewrite peers.dat immediately after adding the new peer
+                    await self.rewrite_peers_file()
+
                     asyncio.create_task(self.send_heartbeat(writer))
                     request_msg = {"type": "request_peer_list", "server_id": self.server_id}
                     writer.write(json.dumps(request_msg).encode() + b'\n')
