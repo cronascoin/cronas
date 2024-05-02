@@ -365,17 +365,27 @@ class Peer:
                 await self.process_message(message, writer)
                 await self.rewrite_peers_file()  # Update peers.dat file after processing each message
         except asyncio.IncompleteReadError:
-            logging.info("Incomplete read error, reconnecting...")
+            logging.info("Incomplete read error, attempting to reconnect...")
+            await self.handle_disconnection(peer_info)
             asyncio.create_task(self.reconnect_to_peer(peer_info))
         except Exception as e:
             logging.error(f"Error during communication with {peer_info}: {e}")
+            await self.handle_disconnection(peer_info)
         finally:
             logging.info(f"Closing connection with {peer_info}")
-            if peer_info in self.peers:  # Confirm peer is still tracked
-                self.peers[peer_info] = int(time.time())  # Final update on connection close
-                await self.rewrite_peers_file()  # Final rewrite to ensure all data is up-to-date
+            await self.handle_disconnection(peer_info)
             writer.close()
             await writer.wait_closed()
+
+    async def handle_disconnection(self, peer_info):
+        """Handles cleanup when a peer disconnects or an error occurs."""
+        if peer_info in self.peers:  # Confirm peer is still tracked
+            self.peers[peer_info] = int(time.time())  # Final update on connection close
+            await self.rewrite_peers_file()  # Final rewrite to ensure all data is up-to-date
+        if peer_info in self.active_peers:  # Remove from active_peers if present
+            del self.active_peers[peer_info]
+            logging.info(f"Removed {peer_info} from active peers due to disconnection or error.")
+
 
 
     async def load_peers(self):
@@ -489,24 +499,24 @@ class Peer:
         max_attempts = 5  # Define a maximum number of reconnection attempts
 
         while attempt < max_attempts:
-            if (host, port) not in self.peers:  # Assuming active_peers stores (host, port) tuples
+            # Check if peer is already considered connected
+            if (host, port) not in self.active_peers:  # Check against the appropriate collection
                 try:
                     await self.connect_to_peer(host, port)
-                    logging.info(f"Reconnected to {host} successfully.")
-                    peer_info = f"{host}:{port}"  # Or (host, port) if you use tuples as keys
+                    logging.info(f"Reconnected to {peer_identifier} successfully.")
+                    peer_info = f"{host}:{port}"
                     self.peers[peer_info] = int(time.time())  # Update last_seen
+                    self.active_peers[peer_info] = (host, port)  # Ensure it is marked as active
                     break
                 except Exception as e:
-                    logging.error(f"Reconnection attempt to {host} failed: {e}")
+                    logging.error(f"Reconnection attempt to {peer_identifier} failed: {e}")
+                    attempt += 1
+                    delay = self.calculate_backoff(attempt)
+                    logging.info(f"Waiting for {delay} seconds before next reconnection attempt to {peer_identifier}.")
+                    await asyncio.sleep(delay)
             else:
                 logging.info(f"Already connected to {peer_identifier}. No need to reconnect.")
                 break
-
-            delay = self.calculate_backoff(attempt)
-            await asyncio.sleep(delay)
-            logging.info(f"Waiting for {delay} seconds before next reconnection attempt to {peer_identifier}.")
-            await asyncio.sleep(delay)
-            attempt += 1
 
         if attempt == max_attempts:
             logging.info(f"Max reconnection attempts reached for {peer_identifier}.")
