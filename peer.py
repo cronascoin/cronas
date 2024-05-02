@@ -175,6 +175,10 @@ class Peer:
                     self.active_peers[remote_server_id] = (host, port)
                     logging.info(f"Connected and acknowledged by peer with server_id {remote_server_id}: {peer_info}")
                     
+                    if host in [self.host, self.external_ip, self.out_ip, "127.0.0.1", "localhost"]:
+                        logging.info(f"Skipping connection to self: {host}:{port}")
+                        return
+
                     # Rewrite peers.dat immediately after adding the new peer
                     await self.rewrite_peers_file()
 
@@ -327,13 +331,21 @@ class Peer:
     def is_valid_peer(self, peer_info):
         try:
             ip, port = peer_info.split(':')
-            ipaddress.ip_address(ip)  # Validate IP address
-            port = int(port)
+            # Validate IP address
+            ipaddress.ip_address(ip)
+
+            # Ensure the IP address is not one of the local/server addresses
+            if ip in [self.host, self.external_ip, self.out_ip, "127.0.0.1", "localhost"]:
+                logging.info(f"Skipping self-peer with IP: {ip}")
+                return False
+
+            port = int(port)  # Validate that port is an integer
             # Ephemeral ports typically range from 32768 to 65535; adjust if your range differs
-            return not 32768 <= port <= 65535
+            return not (32768 <= port <= 65535)
         except ValueError as e:
             logging.error(f"Invalid peer address '{peer_info}': {e}")
             return False
+
 
 
     async def listen_for_messages(self, reader, writer):
