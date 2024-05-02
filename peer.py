@@ -178,8 +178,8 @@ class Peer:
                     if host in [self.host, self.external_ip, self.out_ip, "127.0.0.1", "localhost"]:
                         logging.info(f"Skipping connection to self: {host}:{port}")
                         return
-
                     # Rewrite peers.dat immediately after adding the new peer
+                    await self.mark_peer_changed()
                     await self.rewrite_peers_file()
 
                     asyncio.create_task(self.send_heartbeat(writer))
