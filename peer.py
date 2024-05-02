@@ -179,7 +179,8 @@ class Peer:
                         logging.info(f"Skipping connection to self: {host}:{port}")
                         return
                     # Rewrite peers.dat immediately after adding the new peer
-                    await self.update_peers(peer_info)
+                    self.mark_peer_changed()
+                    await self.rewrite_peers_file()
 
                     asyncio.create_task(self.send_heartbeat(writer))
                     request_msg = {"type": "request_peer_list", "server_id": self.server_id}
@@ -191,6 +192,8 @@ class Peer:
                     self.hello_seq += 1
                     logging.info(f"Successfully connected to {peer_info}")
                     successful_connection = True
+                    self.mark_peer_changed()
+                    await self.rewrite_peers_file()
                     break
 
             except asyncio.TimeoutError:
@@ -440,6 +443,7 @@ class Peer:
                 if peer_info not in self.peers:
                     self.peers[peer_info] = int(time.time())  # Record the time of addition/update
                     logging.info(f"Added new peer {peer_info}.")
+                    self.mark_peer_changed()
                     await self.rewrite_peers_file()
                 # Acknowledge the handshake
                 ack_message = {
