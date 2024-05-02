@@ -632,17 +632,16 @@ class Peer:
 
     async def start_p2p_server(self):
         try:
-            await self.load_peers()
-            await self.connect_to_known_peers()
-            asyncio.create_task(self.schedule_periodic_peer_save())
-
             server = await asyncio.start_server(
                 self.handle_peer_connection, self.host, self.p2p_port,
                 reuse_address=True
             )
             self.p2p_server = server
             logging.info(f"P2P server version {self.version} with ID {self.server_id} listening on {self.host}:{self.p2p_port}")
-
+            await self.load_peers()
+            await self.connect_to_known_peers()
+            asyncio.create_task(self.schedule_periodic_peer_save())
+            
             async with server:
                 await server.serve_forever()
 
