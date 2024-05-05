@@ -196,16 +196,13 @@ class Peer:
                     await self.rewrite_peers_file()
                     break
 
-            except asyncio.TimeoutError:
-                logging.error(f"Timeout error while attempting to connect to {peer_info}.")
-                attempt += 1
-                await asyncio.sleep(await self.calculate_backoff(attempt))
-            except json.JSONDecodeError as e:
-                logging.error(f"JSON decoding error while processing data from {peer_info}: {e}")
-                break
-            except Exception as e:
+            except (asyncio.TimeoutError, json.JSONDecodeError, Exception) as e:
                 logging.error(f"Error while connecting to {peer_info}: {e}")
-                break
+                attempt += 1
+                if attempt < 5:
+                    await asyncio.sleep(await self.calculate_backoff(attempt))
+                else:
+                    logging.info(f"Max connection attempts reached for {peer_info}.")
 
             finally:
                 if not successful_connection and writer is not None and not writer.is_closing():
