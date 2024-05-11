@@ -365,7 +365,7 @@ class Peer:
                 # Acknowledge the handshake
                 ack_message = {
                     "type": "ack",
-                    "payload": "Handshake acknowledged",
+                    "version": self.version, 
                     "server_id": self.server_id
                 }
                 writer.write(json.dumps(ack_message).encode() + b'\n')
