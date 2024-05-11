@@ -128,6 +128,7 @@ class Peer:
                 self.peers[peer_info] = None  # Optionally consider storing more useful information here
             asyncio.create_task(self.connect_to_peer(host, port))
 
+
     async def connect_to_peer(self, host, port):
         peer_info = f"{host}:{port}"
         if host in [self.host, self.external_ip, self.out_ip, "127.0.0.1"]:
@@ -157,14 +158,31 @@ class Peer:
                     attempt += 1
                     await asyncio.sleep(await self.calculate_backoff(attempt))
                     continue
-                
+
                 ack_message = json.loads(data.decode())
                 if ack_message.get("type") == "ack":
-                    remote_version = ack_message.get("version", "unknown")  # Use default value or specific handling if 'version' is missing
+                    remote_version = ack_message.get("version", "unknown")
                     remote_server_id = ack_message["server_id"]
+                    if remote_server_id in self.active_peers:
+                        existing_host, existing_port = self.active_peers[remote_server_id]
+                        if (existing_host, existing_port) != (host, port):
+                            logging.info(f"Replacing old connection {existing_host}:{existing_port} with new connection {host}:{port} for server_id {remote_server_id}.")
+                            await self.close_connection(existing_host, existing_port)
+
+                    self.peers[peer_info] = int(time.time())
                     self.active_peers[remote_server_id] = {"host": host, "port": port, "version": remote_version}
                     logging.info(f"Connected and acknowledged by peer with server_id {remote_server_id}: {peer_info} with version {remote_version}")
-                    
+
+                    # Additional messages post-handshake
+                    asyncio.create_task(self.send_heartbeat(writer))
+                    request_msg = {"type": "request_peer_list", "server_id": self.server_id}
+                    writer.write(json.dumps(request_msg).encode() + b'\n')
+                    await writer.drain()
+
+                    await self.listen_for_messages(reader, writer)
+
+                    self.hello_seq += 1
+                    logging.info(f"Successfully connected to {peer_info}")
                     successful_connection = True
                     self.mark_peer_changed()
                     await self.rewrite_peers_file()
@@ -212,6 +230,15 @@ class Peer:
         except requests.RequestException as e:
             logging.error(f"Failed to detect external IP address: {e}")
             return '127.0.0.1'
+
+    async def handle_disconnection(self, peer_info):
+        """Handles cleanup when a peer disconnects or an error occurs."""
+        if peer_info in self.peers:  # Confirm peer is still tracked
+            self.peers[peer_info] = int(time.time())  # Final update on connection close
+            await self.rewrite_peers_file()  # Final rewrite to ensure all data is up-to-date
+        if peer_info in self.active_peers:  # Remove from active_peers if present
+            del self.active_peers[peer_info]
+            logging.info(f"Removed {peer_info} from active peers due to disconnection or error.")
 
 
     async def handle_peer_connection(self, reader, writer):
@@ -295,15 +322,6 @@ class Peer:
             await self.handle_disconnection(peer_info)
             writer.close()
             await writer.wait_closed()
-
-    async def handle_disconnection(self, peer_info):
-        """Handles cleanup when a peer disconnects or an error occurs."""
-        if peer_info in self.peers:  # Confirm peer is still tracked
-            self.peers[peer_info] = int(time.time())  # Final update on connection close
-            await self.rewrite_peers_file()  # Final rewrite to ensure all data is up-to-date
-        if peer_info in self.active_peers:  # Remove from active_peers if present
-            del self.active_peers[peer_info]
-            logging.info(f"Removed {peer_info} from active peers due to disconnection or error.")
 
     async def load_peers(self):
         """Loads peers from the peers.dat file, merging with seeds, and creates the file if it doesn't exist."""
