@@ -265,7 +265,8 @@ class Peer:
 
     async def listen_for_messages(self, reader, writer):
         addr = writer.get_extra_info('peername')
-        peer_info = f"{addr[0]}:{addr[1]}"  # Format peer_info as 'host:port'
+        host, port = addr[0], addr[1]  # Directly extract host and port
+        peer_info = f"{host}:{port}"  # Format peer_info as 'host:port'
         logging.info(f"Listening for messages from {peer_info}")
         try:
             while True:
@@ -280,7 +281,7 @@ class Peer:
         except asyncio.IncompleteReadError:
             logging.info("Incomplete read error, attempting to reconnect...")
             await self.handle_disconnection(peer_info)
-            asyncio.create_task(self.reconnect_to_peer(peer_info))
+            asyncio.create_task(self.reconnect_to_peer(host, int(port)))  # Correctly pass host and port
         except Exception as e:
             logging.error(f"Error during communication with {peer_info}: {e}")
             await self.handle_disconnection(peer_info)
