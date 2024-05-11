@@ -160,7 +160,7 @@ class Peer:
                 
                 ack_message = json.loads(data.decode())
                 if ack_message.get("type") == "ack":
-                    remote_version = ack_message["version"]
+                    remote_version = ack_message.get("version", "unknown")  # Use default value or specific handling if 'version' is missing
                     remote_server_id = ack_message["server_id"]
                     self.active_peers[remote_server_id] = {"host": host, "port": port, "version": remote_version}
                     logging.info(f"Connected and acknowledged by peer with server_id {remote_server_id}: {peer_info} with version {remote_version}")
@@ -185,6 +185,7 @@ class Peer:
 
         if attempt == 5:
             logging.info(f"Max connection attempts reached for {peer_info}.")
+
 
     def detect_ip_address(self):
         """
