@@ -143,6 +143,7 @@ class Peer:
                 handshake_msg = {
                     "type": "hello",
                     "payload": f"Hello from {self.host}",
+                    "version": self.version,
                     "seq": self.hello_seq + 1,
                     "server_id": self.server_id,
                     "listening_port": self.p2p_port
@@ -159,33 +160,11 @@ class Peer:
                 
                 ack_message = json.loads(data.decode())
                 if ack_message.get("type") == "ack":
+                    remote_version = ack_message["version"]
                     remote_server_id = ack_message["server_id"]
-                    if remote_server_id in self.active_peers:
-                        existing_host, existing_port = self.active_peers[remote_server_id]
-                        if (existing_host, existing_port) != (host, port):
-                            logging.info(f"Replacing old connection {existing_host}:{existing_port} with new connection {host}:{port} for server_id {remote_server_id}.")
-                            await self.close_connection(existing_host, existing_port)
+                    self.active_peers[remote_server_id] = {"host": host, "port": port, "version": remote_version}
+                    logging.info(f"Connected and acknowledged by peer with server_id {remote_server_id}: {peer_info} with version {remote_version}")
                     
-                    self.peers[peer_info] = int(time.time())
-                    self.active_peers[remote_server_id] = (host, port)
-                    logging.info(f"Connected and acknowledged by peer with server_id {remote_server_id}: {peer_info}")
-                    
-                    if host in [self.host, self.external_ip, self.out_ip, "127.0.0.1", "localhost"]:
-                        logging.info(f"Skipping connection to self: {host}:{port}")
-                        return
-                    # Rewrite peers.dat immediately after adding the new peer
-                    self.mark_peer_changed()
-                    await self.rewrite_peers_file()
-
-                    asyncio.create_task(self.send_heartbeat(writer))
-                    request_msg = {"type": "request_peer_list", "server_id": self.server_id}
-                    writer.write(json.dumps(request_msg).encode() + b'\n')
-                    await writer.drain()
-
-                    await self.listen_for_messages(reader, writer)
-
-                    self.hello_seq += 1
-                    logging.info(f"Successfully connected to {peer_info}")
                     successful_connection = True
                     self.mark_peer_changed()
                     await self.rewrite_peers_file()
