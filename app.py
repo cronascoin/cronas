@@ -25,10 +25,10 @@ def load_config(config_path='cronas.conf'):
     if not os.path.exists(config_path):
         config = {
             'server_id': str(uuid.uuid4()),
-            'rpc_password': generate_password(),
             'rpc_port': '4334',
             'p2p_port': '4333',
-            'addnode': ['137.184.80.215:4333']  # Example seed node
+            'addnode': ['137.184.80.215:4333'],  # Example seed node
+            'rpc_password': generate_password()
         }
         with open(config_path, 'w') as configfile:
             for key, value in config.items():
@@ -39,16 +39,19 @@ def load_config(config_path='cronas.conf'):
                     configfile.write(f"{key}={value}\n")
         logging.info("Config file created with default values.")
     else:
-        with open(config_path, 'r') as configfile:
-            for line in configfile:
-                key, value = line.strip().split('=', 1)
-                if key == 'addnode':
-                    if key in config:
-                        config[key].append(value)
+        try:
+            with open(config_path, 'r') as configfile:
+                for line in configfile:
+                    if '=' in line:
+                        key, value = line.strip().split('=', 1)
+                        if key == 'addnode':
+                            config.setdefault(key, []).append(value)
+                        else:
+                            config[key] = value
                     else:
-                        config[key] = [value]
-                else:
-                    config[key] = value
+                        logging.warning(f"Skipping malformed line in config file: {line.strip()}")
+        except Exception as e:
+            logging.error(f"Failed to read the config file: {e}")
         logging.info("Loading from config file.")
     return config
 
