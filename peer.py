@@ -37,6 +37,7 @@ class Peer:
         self.connections = {}  # Dictionary to track connections
         self.shutdown_flag = False  # Initialize the shutdown flag
         
+        
 
     async def add_peer(self, peer_info):
         host, port = peer_info.split(":")
@@ -215,36 +216,40 @@ class Peer:
         try:
             buffer = ''
             while True:
-                data = await reader.read(1024)
-                if not data:
-                    break
+                try:
+                    data = await reader.read(1024)
+                    if not data:
+                        break  # No more data, likely the connection was closed cleanly.
 
-                buffer += data.decode()
-                while '\n' in buffer:
-                    message, buffer = buffer.split('\n', 1)
-                    if message:
-                        message_obj = json.loads(message)
-                        await self.process_message(message_obj, writer)
+                    buffer += data.decode()
+                    while '\n' in buffer:
+                        message, buffer = buffer.split('\n', 1)
+                        if message:
+                            message_obj = json.loads(message)
+                            await self.process_message(message_obj, writer)
 
-                        if message_obj.get('type') == 'hello' and 'listening_port' in message_obj:
-                            host, port = peer_address
-                            peer_info = f"{host}:{message_obj['listening_port']}"
+                            if message_obj.get('type') == 'hello' and 'listening_port' in message_obj:
+                                host, port = peer_address
+                                peer_info = f"{host}:{message_obj['listening_port']}"
+                                if peer_info not in self.peers:
+                                    self.peers[peer_info] = int(time.time())
+                                    await self.rewrite_peers_file()
 
-                            if peer_info not in self.peers:
-                                self.peers[peer_info] = int(time.time())
-                                await self.rewrite_peers_file()
+                except ConnectionResetError:
+                    logging.warning(f"Connection reset by peer {peer_address}. Attempting to handle gracefully.")
+                    break  # Exit the loop and potentially initiate a reconnect or other custom handler.
 
         except asyncio.CancelledError:
             logging.info(f"Connection task with {peer_address} cancelled")
         except (asyncio.IncompleteReadError, json.JSONDecodeError):
-            pass  # Most likely a connection closed before finishing a message
-        except Exception:
-            logging.exception(f"General error during P2P communication with {peer_address}")
+            logging.warning(f"Connection with {peer_address} closed abruptly or received malformed data.")
+        except Exception as e:
+            logging.exception(f"General error during P2P communication with {peer_address}: {e}")
         finally:
             if not writer.is_closing():
                 writer.close()
                 await writer.wait_closed()
-            logging.info(f"Connection with {peer_address} closed")
+            logging.info(f"Connection with {peer_address} closed.")
 
     def is_valid_peer(self, peer_info):
         try:
@@ -500,7 +505,8 @@ class Peer:
 
 
     async def send_heartbeat(self, writer):
-        """Sends a heartbeat message to the connected peer every 60 seconds."""
+        """Sends a heartbeat message to the connected peer after a delay of 60 seconds and then every 60 seconds."""
+        await asyncio.sleep(60)  # Initial delay before the first heartbeat
         try:
             while not writer.is_closing():
                 heartbeat_msg = {
@@ -515,8 +521,7 @@ class Peer:
             logging.info("Heartbeat sending cancelled.")
         except Exception as e:
             logging.error(f"Error sending heartbeat: {e}")
-            # Add backoff or delay before retrying to avoid spamming in case of persistent error
-            await asyncio.sleep(10)
+            await asyncio.sleep(10)  # Retry delay
             if not writer.is_closing():
                 logging.info("Attempting to restart heartbeat.")
                 self.restart_heartbeat(writer)
