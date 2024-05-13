@@ -5,6 +5,7 @@ from aiohttp import web
 import json
 import logging
 
+
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 

@@ -1,8 +1,8 @@
-#Copyright 2024 cronas.org
-#cli.py
+# cli.py
 
 import requests
 import sys
+import json
 
 RPC_SERVER = "http://localhost:4334"
 
@@ -11,8 +11,7 @@ def get_peers():
     if response.status_code == 200:
         print("Peers List:")
         peers = response.json()
-        for peer in peers:
-            print(peer)
+        print(json.dumps(peers, indent=4))  # Output in JSON format with indentation
     else:
         print("Failed to fetch peers.")
 
@@ -35,15 +34,21 @@ def add_node(ip):
     else:
         print(f"Failed to add node: {response.text}")
 
+def display_help():
+    print("Usage:")
+    print("  cli.py addnode <ip>          Add a new node by IP address")
+    print("  cli.py peers                 Retrieve and display the list of peers in JSON format")
+    print("  cli.py transaction <sender> <receiver> <amount>  Send a transaction")
+    print("  cli.py help                  Display this help message")
+    print("  cli.py --help                Display this help message")
+
 def main():
-    if len(sys.argv) < 2:
-        print("Usage:")
-        print("  cli.py addnode <ip>")
-        print("  cli.py peers")
+    if len(sys.argv) < 2 or sys.argv[1] in ["help", "--help"]:
+        display_help()
         return
-    
+
     command = sys.argv[1]
-    
+
     if command == "peers":
         get_peers()
     elif command == "transaction" and len(sys.argv) == 5:
