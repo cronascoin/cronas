@@ -152,10 +152,10 @@ class Peer:
                 }
                 writer.write(json.dumps(handshake_msg).encode() + b'\n')
                 await writer.drain()
-
+                await self.request_peer_list(writer)
                 # Delegate to process_message to handle all incoming messages
                 await self.listen_for_messages(reader, writer)
-                await self.request_peer_list(writer)
+                
                 successful_connection = True
                 break
 
