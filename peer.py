@@ -17,13 +17,12 @@ logging.basicConfig(level=logging.INFO,
                     datefmt='%Y-%m-%d %H:%M:%S')
 
 class Peer:
-    def __init__(self, host, p2p_port, seeds, server_id, version):
+    def __init__(self, host, p2p_port, server_id, version):
         self.server_id = server_id
         self.host = host
         self.p2p_port = p2p_port
         self.peers = {}  # Initialize as a dictionary
         self.active_peers = {}  # Initialize as a dictionary
-        self.seeds = seeds
         self.external_ip = self.detect_ip_address()
         self.out_ip = self.detect_out_ip()
         self.hello_seq = 0  # Initialize the hello_seq attribute here
@@ -156,7 +155,7 @@ class Peer:
 
                 # Delegate to process_message to handle all incoming messages
                 await self.listen_for_messages(reader, writer)
-
+                await self.request_peer_list(writer)
                 successful_connection = True
                 break
 
@@ -294,7 +293,7 @@ class Peer:
             await writer.wait_closed()
 
     async def load_peers(self):
-        """Loads peers from the peers.dat file, merging with seeds, and creates the file if it doesn't exist."""
+        """Loads peers from the peers.dat file, and creates the file if it doesn't exist."""
         loaded_peers_count = 0
         skipped_peers_count = 0
 
@@ -318,17 +317,9 @@ class Peer:
                         logging.warning(f"Invalid line in peers.dat: {line} - Error: {e}")
                         skipped_peers_count += 1
 
-        # Merge seeds
-        for seed in self.seeds:
-            if seed not in self.peers:
-                self.peers[seed] = int(time.time())  # Use current time for last seen
-                loaded_peers_count += 1  # Count seed as loaded if it was added
-                self.mark_peer_changed()  # This marks the peers list as changed
-
-
         # Save the updated peers list back to the file, creating it if necessary
         await self.rewrite_peers_file()
-        logging.info(f"Peers loaded from file or initialized from seeds. Loaded: {loaded_peers_count}, Skipped: {skipped_peers_count}.")
+        logging.info(f"Peers loaded from file. Loaded: {loaded_peers_count}, Skipped: {skipped_peers_count}.")
 
 
     def mark_peer_changed(self):
@@ -433,6 +424,15 @@ class Peer:
         if attempt >= max_attempts:
             logging.info(f"Max reconnection attempts reached for {peer_identifier}.")
 
+    async def request_peer_list(self, writer):
+        request_message = {
+            "type": "request_peer_list",
+            "server_id": self.server_id
+        }
+        writer.write(json.dumps(request_message).encode() + b'\n')
+        await writer.drain()
+        logging.info("Request for peer list sent.")
+
     async def respond_to_heartbeat(self, writer, message):
         """Send a heartbeat_ack in response to a heartbeat and update last_seen."""
         logging.info(f"Heartbeat received with message: {message}")
@@ -523,29 +523,36 @@ class Peer:
 
 
     async def send_peer_list(self, writer):
-        # Initialize an empty list to store peer data
+        logging.info("Attempting to send peer list...")
         peer_list = []
         
-        # Read the peers from the peers.dat file
-        async with aiofiles.open("peers.dat", "r") as f:
-            async for line in f:
-                if line.strip():  # Ensure the line is not empty
-                    parts = line.strip().split(':')
-                    if len(parts) >= 2:  # Basic validation to check format
-                        ip_port = f"{parts[0]}:{parts[1]}"  # Recreate the IP:port format
-                        peer_list.append(ip_port)
+        try:
+            # Attempt to open and read from the peers.dat file
+            async with aiofiles.open("peers.dat", "r") as f:
+                async for line in f:
+                    if line.strip():  # Ensure the line is not empty
+                        parts = line.strip().split(':')
+                        if len(parts) >= 2:  # Basic validation to check format
+                            ip_port = f"{parts[0]}:{parts[1]}"  # Recreate the IP:port format
+                            peer_list.append(ip_port)
+        except Exception as e:
+            logging.error(f"Failed to read peers.dat: {e}")
+            return
 
         # Prepare the message containing the peer list
-        peer_list_message = {
-            "type": "peer_list",
-            "payload": peer_list,
-            "server_id": self.server_id,
-        }
+        if peer_list:
+            peer_list_message = {
+                "type": "peer_list",
+                "payload": peer_list,
+                "server_id": self.server_id,
+            }
 
-        # Serialize the peer data to JSON and send it
-        writer.write(json.dumps(peer_list_message).encode() + b'\n')
-        await writer.drain()
-        logging.info("Sent sanitized peer list from peers.dat to a peer.")
+            # Serialize the peer data to JSON and send it
+            writer.write(json.dumps(peer_list_message).encode() + b'\n')
+            await writer.drain()
+            logging.info("Sent sanitized peer list from peers.dat to a peer.")
+        else:
+            logging.warning("No peers found to send.")
 
 
     async def start_p2p_server(self):
