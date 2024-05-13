@@ -5,6 +5,9 @@ from aiohttp import web
 import json
 import logging
 
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 class RPCServer:
     def __init__(self, peer, host, rpc_port, rpc_password):
         self.peer = peer
@@ -44,9 +47,24 @@ class RPCServer:
             logging.info("RPC Server closed.")
 
     async def get_peers(self, request):
-        # Retrieve and format active peers
-        active_peers_list = [f"{host}:{port}" for host, port in self.peer.active_peers.values()]
-        return web.Response(text=json.dumps(active_peers_list), content_type='application/json')
+        try:
+            logging.info("Fetching active peers...")
+            active_peers_list = [
+                {
+                    "server_id": server_id,
+                    "host": peer_details['host'],
+                    "port": peer_details['port'],
+                    "version": peer_details.get('version', 'unknown')  # Providing default if not present
+                }
+                for server_id, peer_details in self.peer.active_peers.items()
+            ]
+            logging.debug(f"Prepared peers list for JSON serialization: {active_peers_list}")
+            json_response = json.dumps(active_peers_list)
+            logging.debug(f"Serialized JSON response: {json_response}")
+            return web.Response(text=json_response, content_type='application/json')
+        except Exception as e:
+            logging.error(f"Error fetching peers: {e}")
+            return web.Response(status=500, text=json.dumps({"error": "Internal server error"}))
 
     async def add_node(self, request):
         # Method for adding a new peer node
@@ -55,4 +73,6 @@ class RPCServer:
             self.peer.add_peer(ip)
             return web.Response(text=json.dumps({"message": "Node added successfully"}), content_type='application/json')
         else:
-            return web.Response(status=400, text=json.dumps({"error": "Invalid request"}), content_type='application/json')
+            return web.Response(status=400, text=json.dumps({"error": "Invalid request"}))
+
+# Additional methods as needed
