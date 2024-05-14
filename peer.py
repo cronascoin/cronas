@@ -326,6 +326,14 @@ class Peer:
         else:
             logging.info(f"Unhandled message type from {peer_info}: {message_type}")
 
+    def get_local_addr_and_port(self, addr):
+        """Determine the local IP address and ephemeral port for a given address."""
+        if self.is_private_ip(self.out_ip):
+            return self.out_ip, 49152  # Example ephemeral port for private IP
+        else:
+            return self.external_ip, 49152  # Example ephemeral port for public IP
+
+
     async def handle_hello_message(self, message, writer):
         addr = writer.get_extra_info('peername')
         peer_info = f"{addr[0]}:{addr[1]}"
