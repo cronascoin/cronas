@@ -1,10 +1,10 @@
 #Copyright 2024 cronas.org
 # rpc.py
 
+import time
 from aiohttp import web
 import json
 import logging
-
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -52,12 +52,13 @@ class RPCServer:
             logging.info("Fetching active peers...")
             active_peers_list = [
                 {
-                    "server_id": server_id,
-                    "host": peer_details['host'],
-                    "port": peer_details['port'],
+                    "server_id": peer_details['server_id'],
+                    "addr": peer_details.get('addr', 'unknown'),
+                    "addrlocal": peer_details.get('addrlocal', 'unknown'),
+                    "addrbind": peer_details.get('addrbind', 'unknown'),
                     "version": peer_details.get('version', 'unknown')  # Providing default if not present
                 }
-                for server_id, peer_details in self.peer.active_peers.items()
+                for peer_details in self.peer.active_peers.values()
             ]
             logging.debug(f"Prepared peers list for JSON serialization: {active_peers_list}")
             json_response = json.dumps(active_peers_list)
@@ -68,12 +69,36 @@ class RPCServer:
             return web.Response(status=500, text=json.dumps({"error": "Internal server error"}))
 
     async def add_node(self, request):
-        # Method for adding a new peer node
-        data = await request.json()
-        if ip := data.get('ip'):
-            self.peer.add_peer(ip)
-            return web.Response(text=json.dumps({"message": "Node added successfully"}), content_type='application/json')
-        else:
-            return web.Response(status=400, text=json.dumps({"error": "Invalid request"}))
+        try:
+            data = await request.json()
+            required_fields = ['addr', 'addrlocal', 'addrbind', 'server_id', 'version']
+            if any(field not in data for field in required_fields):
+                return web.Response(status=400, text=json.dumps({"error": "Invalid request"}))
+            
+            addr = data['addr']
+            addrlocal = data['addrlocal']
+            addrbind = data['addrbind']
+            server_id = data['server_id']
+            version = data['version']
+            peer_info = f"{addr}"
+            self.peer.peers[peer_info] = int(time.time())
+            self.peer.active_peers[peer_info] = {
+                'addr': addr,
+                'addrlocal': addrlocal,
+                'addrbind': addrbind,
+                'server_id': server_id,
+                'version': version
+            }
+            self.peer.mark_peer_changed()
+            await self.peer.rewrite_peers_file()
+            return web.Response(
+                text=json.dumps({"message": "Node added successfully"}),
+                content_type='application/json'
+            )
+        except json.JSONDecodeError:
+            return web.Response(status=400, text=json.dumps({"error": "Invalid JSON"}))
+        except Exception as e:
+            logging.error(f"Error adding node: {e}")
+            return web.Response(status=500, text=json.dumps({"error": "Internal server error"}))
 
 # Additional methods as needed

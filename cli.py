@@ -28,8 +28,15 @@ def send_transaction(sender, receiver, amount):
     else:
         print("Failed to submit transaction.")
 
-def add_node(ip):
-    response = requests.post(f"{RPC_SERVER}/addnode", json={"ip": ip})
+def add_node(addr, addrlocal, addrbind, server_id, version):
+    data = {
+        "addr": addr,
+        "addrlocal": addrlocal,
+        "addrbind": addrbind,
+        "server_id": server_id,
+        "version": version
+    }
+    response = requests.post(f"{RPC_SERVER}/addnode", json=data)
     if response.status_code == 200:
         print("Node added successfully.")
     else:
@@ -37,7 +44,7 @@ def add_node(ip):
 
 def display_help():
     print("Usage:")
-    print("  cli.py addnode <ip>          Add a new node by IP address")
+    print("  cli.py addnode <addr> <addrlocal> <addrbind> <server_id> <version>  Add a new node")
     print("  cli.py peers                 Retrieve and display the list of peers in JSON format")
     print("  cli.py transaction <sender> <receiver> <amount>  Send a transaction")
     print("  cli.py help                  Display this help message")
@@ -55,9 +62,9 @@ def main():
     elif command == "transaction" and len(sys.argv) == 5:
         _, _, sender, receiver, amount = sys.argv
         send_transaction(sender, receiver, amount)
-    elif command == "addnode" and len(sys.argv) == 3:
-        _, _, ip = sys.argv
-        add_node(ip)
+    elif command == "addnode" and len(sys.argv) == 7:
+        _, _, addr, addrlocal, addrbind, server_id, version = sys.argv
+        add_node(addr, addrlocal, addrbind, server_id, version)
     else:
         print("Invalid command or arguments.")
 

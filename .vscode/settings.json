@@ -1,6 +1,8 @@
 {
     "cSpell.words": [
         "addnode",
+        "addrbind",
+        "addrlocal",
         "aiofiles",
         "aiohttp",
         "configfile",
@@ -15,6 +17,7 @@
         "routable",
         "rpcuser",
         "socketname",
+        "sockname",
         "sourcery"
     ]
 }

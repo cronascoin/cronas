@@ -2,6 +2,7 @@
 #peer.py
 
 import asyncio
+from csv import writer
 import errno
 import json
 import logging
@@ -10,7 +11,6 @@ import socket
 import aiofiles
 import time
 import requests
-import ipaddress
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -36,23 +36,6 @@ class Peer:
         self.peers_changed = False
         self.connections = {}  # Dictionary to track connections
         self.shutdown_flag = False  # Initialize the shutdown flag
-        
-        
-
-    async def add_peer(self, peer_info):
-        host, port = peer_info.split(":")
-        if host in [self.host, self.external_ip, self.out_ip, "127.0.0.1", "localhost"]:
-            logging.info(f"Attempted to add self as peer: {peer_info}")
-            return False
-
-        if peer_info in self.peers:
-            logging.info(f"Updated last seen for peer: {peer_info}")
-        else:
-            logging.info(f"Added new peer: {peer_info}")
-        self.peers[peer_info] = int(time.time())
-        self.mark_peer_changed()
-        return True
-
 
     async def calculate_backoff(self, attempt):
         """Calculates the backoff time with escalating delays."""
@@ -88,7 +71,6 @@ class Peer:
             self.p2p_server.close()
             await self.p2p_server.wait_closed()
             logging.info("P2P server closed.")
-
 
     async def connect_to_known_peers(self):
         """Asynchronously attempts to connect to all known peers, avoiding self-connection."""
@@ -130,7 +112,6 @@ class Peer:
                 self.peers[peer_info] = None  # Optionally consider storing more useful information here
             asyncio.create_task(self.connect_to_peer(host, port))
 
-
     async def connect_to_peer(self, host, port):
         peer_info = f"{host}:{port}"
         if host in [self.host, self.external_ip, self.out_ip, "127.0.0.1"]:
@@ -143,6 +124,14 @@ class Peer:
         while not self.shutdown_flag and attempt < 5:
             try:
                 reader, writer = await asyncio.open_connection(host, port)
+                
+                # Get local address and port (ephemeral port)
+                local_addr, local_port = writer.get_extra_info('sockname')
+                
+                # Use the local IP and port as addrlocal and addrbind
+                addrlocal = f"{self.out_ip}:{local_port}"
+                addrbind = f"{self.external_ip}:{local_port}"
+                
                 handshake_msg = {
                     "type": "hello",
                     "payload": f"Hello from {self.host}",
@@ -170,9 +159,21 @@ class Peer:
                     writer.close()
                     await writer.wait_closed()
 
+        if successful_connection:
+            # Add the peer after a successful connection
+            self.peers[peer_info] = int(time.time())
+            self.active_peers[peer_info] = {
+                'addr': peer_info,
+                'addrlocal': addrlocal,
+                'addrbind': addrbind,
+                'server_id': self.server_id,
+                'version': self.version,
+                'last_seen': int(time.time())
+            }
+            self.mark_peer_changed()
+
         if attempt == 5:
             logging.info(f"Max connection attempts reached for {peer_info}.")
-
 
     def detect_ip_address(self):
         """
@@ -208,7 +209,6 @@ class Peer:
         if peer_info in self.active_peers:  # Remove from active_peers if present
             del self.active_peers[peer_info]
             logging.info(f"Removed {peer_info} from active peers due to disconnection or error.")
-
 
     async def handle_peer_connection(self, reader, writer):
         peer_address = writer.get_extra_info('peername')
@@ -250,24 +250,6 @@ class Peer:
                 writer.close()
                 await writer.wait_closed()
             logging.info(f"Connection with {peer_address} closed.")
-
-    def is_valid_peer(self, peer_info):
-        try:
-            ip, port = peer_info.split(':')
-            # Validate IP address
-            ipaddress.ip_address(ip)
-
-            # Ensure the IP address is not one of the local/server addresses
-            if ip in [self.host, self.external_ip, self.out_ip, "127.0.0.1", "localhost"]:
-                logging.info(f"Skipping self-peer with IP: {ip}")
-                return False
-
-            port = int(port)  # Validate that port is an integer
-            # Ephemeral ports typically range from 32768 to 65535; adjust if your range differs
-            return not (32768 <= port <= 65535)
-        except ValueError as e:
-            logging.error(f"Invalid peer address '{peer_info}': {e}")
-            return False
 
     async def listen_for_messages(self, reader, writer):
         addr = writer.get_extra_info('peername')
@@ -326,7 +308,6 @@ class Peer:
         await self.rewrite_peers_file()
         logging.info(f"Peers loaded from file. Loaded: {loaded_peers_count}, Skipped: {skipped_peers_count}.")
 
-
     def mark_peer_changed(self):
         self.peers_changed = True
         logging.debug("Peers data marked as changed.")
@@ -337,62 +318,102 @@ class Peer:
         await self.update_last_seen(peer_info)
         logging.info(f"Received message from {peer_info}: {message}")
 
-        if message.get("type") == "hello":
-            # Respond to hello with ack, update peers, start listening for further messages
-            if 'listening_port' in message and isinstance(message['listening_port'], int):
-                peer_port = message['listening_port']
-                peer_info = f"{addr[0]}:{peer_port}"
-                if peer_info not in self.peers:
-                    self.peers[peer_info] = int(time.time())
-                    logging.info(f"Added new peer {peer_info}.")
-                    self.mark_peer_changed()
-                    await self.rewrite_peers_file()
-                
-                ack_message = {
-                    "type": "ack",
-                    "payload": "Handshake acknowledged",
-                    "version": self.version, 
-                    "server_id": self.server_id
-                }
-                writer.write(json.dumps(ack_message).encode() + b'\n')
-                await writer.drain()
-                logging.info(f"Handshake acknowledged to {peer_info}")
-                # Start sending heartbeats
-                asyncio.create_task(self.send_heartbeat(writer))
-            else:
-                logging.error("Invalid or missing listening port in handshake message.")
+        message_type = message.get("type")
+        if message_type == "hello":
+            await self.handle_hello_message(message, writer)
+        elif message_type == "ack":
+            await self.handle_ack_message(message, writer)
+        elif message_type == "request_peer_list":
+            await self.send_peer_list(writer)
+        elif message_type == "heartbeat":
+            await self.respond_to_heartbeat(writer, message)
+        elif message_type == "peer_list":
+            await self.handle_peer_list_message(message)
+        elif message_type == "heartbeat_ack":
+            logging.info(f"Heartbeat acknowledgment from {peer_info}")
+        else:
+            logging.info(f"Unhandled message type from {peer_info}: {message_type}")
 
-        elif message.get("type") == "ack":
-            # Initial post-handshake ack handling
-            remote_version = message.get("version", "unknown")
-            remote_server_id = message["server_id"]
-            self.active_peers[remote_server_id] = {"host": addr[0], "port": addr[1], "version": remote_version}
-            logging.info(f"Connection fully established with {peer_info}, version {remote_version}")
-            self.mark_peer_changed()
-            await self.rewrite_peers_file()
+    async def handle_hello_message(self, message, writer):
+        addr = writer.get_extra_info('peername')
+        peer_info = f"{addr[0]}:{addr[1]}"
+        
+        if 'listening_port' in message and isinstance(message['listening_port'], int):
+            peer_port = message['listening_port']
+            peer_info = f"{addr[0]}:{peer_port}"
+            if peer_info not in self.peers:
+                self.peers[peer_info] = int(time.time())
+                logging.info(f"Added new peer {peer_info}.")
+                self.mark_peer_changed()
+                await self.rewrite_peers_file()
+            
+            ack_message = {
+                "type": "ack",
+                "payload": "Handshake acknowledged",
+                "version": self.version, 
+                "server_id": self.server_id
+            }
+            writer.write(json.dumps(ack_message).encode() + b'\n')
+            await writer.drain()
+            logging.info(f"Handshake acknowledged to {peer_info}")
             # Start sending heartbeats
             asyncio.create_task(self.send_heartbeat(writer))
-
-        elif message.get("type") == "request_peer_list":
-            await self.send_peer_list(writer)
-
-        elif message.get("type") == "heartbeat":
-            await self.respond_to_heartbeat(writer, message)
-
-        elif message.get("type") == "peer_list":
-            if new_peers := message.get("payload", []):
-                logging.info("Processing and updating with new peer list...")
-                await self.update_peers(new_peers)
-                self.mark_peer_changed()
-            else:
-                logging.warning("Received empty peer list.")
-
-        elif message.get("type") == "heartbeat_ack":
-            logging.info(f"Heartbeat acknowledgment from {peer_info}")
-
         else:
-            logging.info(f"Unhandled message type from {peer_info}: {message['type']}")
+            logging.error("Invalid or missing listening port in handshake message.")
 
+    async def handle_ack_message(self, message, writer):
+        addr = writer.get_extra_info('peername')
+        peer_info = f"{addr[0]}:{addr[1]}"
+        remote_version = message.get("version", "unknown")
+        remote_server_id = message.get("server_id", "unknown")
+        
+        # Get local address and port (ephemeral port)
+        local_addr, local_port = writer.get_extra_info('sockname')
+        
+        self.active_peers[peer_info] = {
+            "addr": peer_info,
+            "addrlocal": f"{self.out_ip}:{local_port}",
+            "addrbind": f"{self.external_ip}:{local_port}",
+            "server_id": remote_server_id,
+            "version": remote_version,
+            "last_seen": int(time.time())
+        }
+        logging.info(f"Connection fully established with {peer_info}, version {remote_version}")
+        self.mark_peer_changed()
+        await self.rewrite_peers_file()
+        # Start sending heartbeats
+        asyncio.create_task(self.send_heartbeat(writer))
+        
+    async def handle_peer_list_message(self, message):
+        if new_peers := message.get("payload", []):
+            logging.info("Processing and updating with new peer list...")
+            for new_peer in new_peers:
+                if isinstance(new_peer, dict):
+                    peer_info = new_peer.get('addr')
+                    server_id = new_peer.get('server_id')
+                    version = new_peer.get('version')
+                    if peer_info and server_id and version:
+                        ip, port = peer_info.split(':')
+                        self.peers[peer_info] = int(time.time())
+
+                        # Use local ephemeral ports for addrlocal and addrbind if available
+                        local_addr, local_port = self.get_local_addr_and_port(ip, port)
+
+                        self.active_peers[peer_info] = {
+                            'addr': peer_info,
+                            'addrlocal': f"{local_addr}:{local_port}",
+                            'addrbind': f"{local_addr}:{local_port}",
+                            'server_id': server_id,
+                            'version': version,
+                            'last_seen': int(time.time())
+                        }
+                        self.mark_peer_changed()
+                    else:
+                        logging.warning(f"Incomplete peer information received: {new_peer}")
+                else:
+                    logging.warning(f"Expected dictionary but got {type(new_peer)}: {new_peer}")
+        else:
+            logging.warning("Received empty peer list.")
 
     async def reconnect_to_peer(self, host, port):
         peer_identifier = f"{host}:{port}"
@@ -417,7 +438,14 @@ class Peer:
                     # Update peer status on successful reconnection
                     peer_info = f"{host}:{port}"
                     self.peers[peer_info] = int(time.time())  # Update last_seen
-                    self.active_peers[peer_info] = (host, port)  # Ensure it is marked as active
+                    local_addr, local_port = writer.get_extra_info('sockname')
+                    self.active_peers[peer_info] = {
+                        'addr': peer_info,
+                        'addrlocal': f"{self.out_ip}:{local_port}",
+                        'addrbind': f"{self.external_ip}:{local_port}",
+                        'server_id': self.server_id,
+                        'version': self.version
+                    }
                     break
                 except Exception as e:
                     logging.error(f"Reconnection attempt to {peer_identifier} failed: {e}")
@@ -439,14 +467,12 @@ class Peer:
         logging.info("Request for peer list sent.")
 
     async def respond_to_heartbeat(self, writer, message):
-        """Send a heartbeat_ack in response to a heartbeat and update last_seen."""
-        logging.info(f"Heartbeat received with message: {message}")
-
-        peer_info = writer.get_extra_info('peername')  # Extract peer_info
-
-        # Update last_seen in your peers dictionary
-        if peer_info in self.peers:
-            self.peers[peer_info] = int(time.time())  # Update with current timestamp
+        peer_info = writer.get_extra_info('peername')
+        peer_info_str = f"{peer_info[0]}:{peer_info[1]}"
+        
+        if peer_info_str in self.active_peers:
+            self.active_peers[peer_info_str]['last_seen'] = int(time.time())
+            logging.info(f"Updated last seen for {peer_info_str}")
 
         ack_message = {
             "type": "heartbeat_ack",
@@ -455,7 +481,7 @@ class Peer:
         }
         writer.write(json.dumps(ack_message).encode() + b'\n')
         await writer.drain()
-        await self.rewrite_peers_file()  # Correctly call the method without parameters
+        logging.info(f"Sent heartbeat acknowledgment to {peer_info_str}.")
 
     def restart_heartbeat(self, writer):
         if writer and not writer.is_closing():
@@ -464,8 +490,7 @@ class Peer:
             logging.info("Heartbeat task restarted.")
         else:
             logging.info("Writer is closing, not restarting heartbeat.")
-            
-            
+
     async def rewrite_peers_file(self):
         """Rewrites the peers.dat file if there have been changes."""
         if not self.peers_changed:
@@ -473,7 +498,7 @@ class Peer:
 
         async with self.file_lock:
             try:
-                valid_peers = {peer_info: last_seen for peer_info, last_seen in self.peers.items() if self.is_valid_peer(peer_info)}
+                valid_peers = dict(self.peers.items())
                 async with aiofiles.open("peers.dat", "w") as f:
                     for peer_info, last_seen in valid_peers.items():
                         await f.write(f"{peer_info}:{last_seen}\n")
@@ -483,7 +508,6 @@ class Peer:
                 logging.error(f"Failed to open peers.dat: {e}")
             except Exception as e:
                 logging.error(f"Failed to rewrite peers.dat: {e}")
-
 
     async def schedule_periodic_peer_save(self):
         """Periodically saves the peers list to a file."""
@@ -503,7 +527,6 @@ class Peer:
         else:
             self.pending_file_write = True  # Set pending write flag if another write is scheduled
 
-
     async def send_heartbeat(self, writer):
         """Sends a heartbeat message to the connected peer after a delay of 60 seconds and then every 60 seconds."""
         await asyncio.sleep(60)  # Initial delay before the first heartbeat
@@ -512,7 +535,8 @@ class Peer:
                 heartbeat_msg = {
                     "type": "heartbeat",
                     "payload": "ping",
-                    "server_id": self.server_id
+                    "server_id": self.server_id,
+                    "version": self.version
                 }
                 writer.write(json.dumps(heartbeat_msg).encode() + b'\n')
                 await writer.drain()
@@ -526,40 +550,26 @@ class Peer:
                 logging.info("Attempting to restart heartbeat.")
                 self.restart_heartbeat(writer)
 
-
     async def send_peer_list(self, writer):
         logging.info("Attempting to send peer list...")
-        peer_list = []
-        
-        try:
-            # Attempt to open and read from the peers.dat file
-            async with aiofiles.open("peers.dat", "r") as f:
-                async for line in f:
-                    if line.strip():  # Ensure the line is not empty
-                        parts = line.strip().split(':')
-                        if len(parts) >= 2:  # Basic validation to check format
-                            ip_port = f"{parts[0]}:{parts[1]}"  # Recreate the IP:port format
-                            peer_list.append(ip_port)
-        except Exception as e:
-            logging.error(f"Failed to read peers.dat: {e}")
-            return
-
-        # Prepare the message containing the peer list
-        if peer_list:
-            peer_list_message = {
-                "type": "peer_list",
-                "payload": peer_list,
-                "server_id": self.server_id,
+        peer_list = [
+            {
+                "addr": peer_info,
+                "server_id": details.get("server_id", "unknown"),
+                "version": details.get("version", "unknown")
             }
+            for peer_info, details in self.active_peers.items()
+        ]
 
-            # Serialize the peer data to JSON and send it
-            writer.write(json.dumps(peer_list_message).encode() + b'\n')
-            await writer.drain()
-            logging.info("Sent sanitized peer list from peers.dat to a peer.")
-        else:
-            logging.warning("No peers found to send.")
+        message = {
+            "type": "peer_list",
+            "payload": peer_list
+        }
 
-
+        writer.write(json.dumps(message).encode() + b'\n')
+        await writer.drain()
+        logging.info("Sent peer list.")
+        
     async def start_p2p_server(self):
         try:
             server = await asyncio.start_server(
@@ -596,17 +606,15 @@ class Peer:
         """
         updated = False
         for peer_info in new_peers:
-            if self.is_valid_peer(peer_info) and ':' in peer_info:
-                ip, port = peer_info.split(':')
-                if ip == self.out_ip:
-                    logging.info(f"Skipping addition of own external IP {peer_info} to peer list.")
-                    continue
-                if peer_info not in self.peers:
-                    self.peers[peer_info] = int(time.time())  # Update last seen to current time
-                    logging.info(f"Peer {peer_info} added to the list.")
-                    updated = True
+            ip, port = peer_info.split(':')
+            if ip == self.out_ip:
+                logging.info(f"Skipping addition of own external IP {peer_info} to peer list.")
+                continue
+            if peer_info not in self.peers:
+                self.peers[peer_info] = int(time.time())  # Update last seen to current time
+                logging.info(f"Peer {peer_info} added to the list.")
+                updated = True
 
         if updated:
             self.mark_peer_changed()
             await self.rewrite_peers_file()  # Save changes if any valid new peers were added
-            
