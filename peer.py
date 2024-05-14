@@ -7,10 +7,10 @@ import errno
 import json
 import logging
 import os
-import socket
 import aiofiles
-import time
+import socket
 import requests
+import time
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -383,11 +383,19 @@ class Peer:
         await self.rewrite_peers_file()
         # Start sending heartbeats
         asyncio.create_task(self.send_heartbeat(writer))
-        
+
     async def handle_peer_list_message(self, message):
         if new_peers := message.get("payload", []):
             logging.info("Processing and updating with new peer list...")
             for new_peer in new_peers:
+                # Convert string format to dictionary if necessary
+                if isinstance(new_peer, str):
+                    new_peer = {
+                        'addr': new_peer,
+                        'server_id': 'unknown',
+                        'version': 'unknown'
+                    }
+                
                 if isinstance(new_peer, dict):
                     peer_info = new_peer.get('addr')
                     server_id = new_peer.get('server_id')
@@ -552,24 +560,37 @@ class Peer:
 
     async def send_peer_list(self, writer):
         logging.info("Attempting to send peer list...")
-        peer_list = [
-            {
-                "addr": peer_info,
-                "server_id": details.get("server_id", "unknown"),
-                "version": details.get("version", "unknown")
-            }
-            for peer_info, details in self.active_peers.items()
-        ]
-
-        message = {
-            "type": "peer_list",
-            "payload": peer_list
-        }
-
-        writer.write(json.dumps(message).encode() + b'\n')
-        await writer.drain()
-        logging.info("Sent peer list.")
+        peer_list = []
         
+        try:
+            # Attempt to open and read from the peers.dat file
+            async with aiofiles.open("peers.dat", "r") as f:
+                async for line in f:
+                    if line.strip():  # Ensure the line is not empty
+                        parts = line.strip().split(':')
+                        if len(parts) >= 2:  # Basic validation to check format
+                            ip_port = f"{parts[0]}:{parts[1]}"  # Recreate the IP:port format
+                            peer_list.append(ip_port)
+        except Exception as e:
+            logging.error(f"Failed to read peers.dat: {e}")
+            return
+
+        # Prepare the message containing the peer list
+        if peer_list:
+            peer_list_message = {
+                "type": "peer_list",
+                "payload": peer_list,
+                "server_id": self.server_id,
+                "version": self.version
+            }
+
+            # Serialize the peer data to JSON and send it
+            writer.write(json.dumps(peer_list_message).encode() + b'\n')
+            await writer.drain()
+            logging.info("Sent sanitized peer list from peers.dat to a peer.")
+        else:
+            logging.warning("No peers found to send.")
+
     async def start_p2p_server(self):
         try:
             server = await asyncio.start_server(
@@ -618,3 +639,9 @@ class Peer:
         if updated:
             self.mark_peer_changed()
             await self.rewrite_peers_file()  # Save changes if any valid new peers were added
+
+    def get_local_addr_and_port(self, writer):
+        """Returns the local address and ephemeral port used for the connection."""
+        local_addr, local_port = writer.get_extra_info('sockname')
+        return local_addr, local_port
+
