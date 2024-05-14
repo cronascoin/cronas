@@ -126,11 +126,11 @@ class Peer:
                 reader, writer = await asyncio.open_connection(host, port)
                 
                 # Get local address and port (ephemeral port)
-                local_addr, local_port = writer.get_extra_info('sockname')
+                local_addr, local_port = self.get_local_addr_and_port(writer)
                 
                 # Use the local IP and port as addrlocal and addrbind
-                addrlocal = f"{self.out_ip}:{local_port}"
-                addrbind = f"{self.external_ip}:{local_port}"
+                addrlocal = f"{local_addr}:{local_port}"
+                addrbind = f"{local_addr}:{local_port}"
                 
                 handshake_msg = {
                     "type": "hello",
@@ -368,21 +368,21 @@ class Peer:
         remote_server_id = message.get("server_id", "unknown")
         
         # Get local address and port (ephemeral port)
-        local_addr, local_port = writer.get_extra_info('sockname')
+        local_addr, local_port = self.get_local_addr_and_port(writer)
         
         self.active_peers[peer_info] = {
             "addr": peer_info,
-            "addrlocal": f"{self.out_ip}:{local_port}",
-            "addrbind": f"{self.external_ip}:{local_port}",
+            "addrlocal": f"{local_addr}:{local_port}",
+            "addrbind": f"{local_addr}:{local_port}",
             "server_id": remote_server_id,
-            "version": remote_version,
-            "last_seen": int(time.time())
+            "version": remote_version
         }
         logging.info(f"Connection fully established with {peer_info}, version {remote_version}")
         self.mark_peer_changed()
         await self.rewrite_peers_file()
         # Start sending heartbeats
         asyncio.create_task(self.send_heartbeat(writer))
+
 
     async def handle_peer_list_message(self, message):
         if new_peers := message.get("payload", []):
