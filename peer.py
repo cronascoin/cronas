@@ -133,7 +133,8 @@ class Peer:
                 local_addr, local_port = writer.get_extra_info('sockname')
 
                 # Use the local IP and port as addrlocal and addrbind
-                addrlocal, addrbind = self.get_local_addr_and_port((local_addr, local_port))
+                addrlocal = f"{self.out_ip}:{local_port}"
+                addrbind = f"{self.external_ip}:{local_port}"
 
                 handshake_msg = {
                     "type": "hello",
@@ -167,8 +168,8 @@ class Peer:
             self.peers[peer_info] = int(time.time())
             self.active_peers[peer_info] = {
                 'addr': peer_info,
-                'addrlocal': f"{addrlocal}:{local_port}",
-                'addrbind': f"{addrbind}:{local_port}",
+                'addrlocal': addrlocal,
+                'addrbind': addrbind,
                 'server_id': self.server_id,
                 'version': self.version,
                 'last_seen': int(time.time())
@@ -177,7 +178,6 @@ class Peer:
 
         if attempt == 5:
             logging.info(f"Max connection attempts reached for {peer_info}.")
-
 
     def detect_ip_address(self):
         try:
@@ -326,14 +326,6 @@ class Peer:
         else:
             logging.info(f"Unhandled message type from {peer_info}: {message_type}")
 
-
-    def get_local_addr_and_port(self, addr):
-        if self.is_private_ip(self.out_ip):
-            return self.out_ip, addr[1]  # Use the actual port from the address tuple
-        else:
-            return self.external_ip, addr[1]  # Use the actual port from the address tuple
-
-
     async def handle_hello_message(self, message, writer):
         addr = writer.get_extra_info('peername')
         peer_info = f"{addr[0]}:{addr[1]}"
@@ -361,7 +353,6 @@ class Peer:
         else:
             logging.error("Invalid or missing listening port in handshake message.")
 
-
     async def handle_ack_message(self, message, writer):
         addr = writer.get_extra_info('peername')
         peer_info = f"{addr[0]}:{addr[1]}"
@@ -370,12 +361,17 @@ class Peer:
 
         local_addr, local_port = writer.get_extra_info('sockname')
 
-        addrlocal, addrbind = self.get_local_addr_and_port((local_addr, local_port))
+        if self.is_private_ip(local_addr):
+            addrlocal = f"{self.external_ip}:{local_port}"
+            addrbind = f"{self.out_ip}:{local_port}"
+        else:
+            addrlocal = f"{self.out_ip}:{local_port}"
+            addrbind = f"{self.external_ip}:{local_port}"
 
         self.active_peers[peer_info] = {
             "addr": peer_info,
-            "addrlocal": f"{addrlocal}:{local_port}",
-            "addrbind": f"{addrbind}:{local_port}",
+            "addrlocal": addrlocal,
+            "addrbind": addrbind,
             "server_id": remote_server_id,
             "version": remote_version
         }
@@ -383,7 +379,6 @@ class Peer:
         self.mark_peer_changed()
         await self.rewrite_peers_file()
         asyncio.create_task(self.send_heartbeat(writer))
-
 
     async def handle_peer_list_message(self, message):
         if new_peers := message.get("payload", []):
@@ -412,12 +407,12 @@ class Peer:
                         ip, port = peer_info.split(':')
                         self.peers[peer_info] = int(time.time())
 
-                        addrlocal, addrbind = self.get_local_addr_and_port((ip, int(port)))
+                        local_addr, local_port = self.get_local_addr_and_port(ip)
 
                         self.active_peers[peer_info] = {
                             'addr': peer_info,
-                            'addrlocal': f"{addrlocal}:{port}" if self.is_private_ip(self.out_ip) else f"{self.external_ip}:{port}",
-                            'addrbind': f"{self.external_ip}:{port}" if self.is_private_ip(self.out_ip) else f"{self.out_ip}:{port}",
+                            'addrlocal': f"{self.out_ip}:{local_port}" if self.is_private_ip(self.out_ip) else f"{self.external_ip}:{local_port}",
+                            'addrbind': f"{self.external_ip}:{local_port}" if self.is_private_ip(self.out_ip) else f"{self.out_ip}:{local_port}",
                             'server_id': server_id,
                             'version': version,
                             'last_seen': int(time.time())
@@ -429,7 +424,6 @@ class Peer:
                     logging.warning(f"Expected dictionary but got {type(new_peer)}: {new_peer}")
         else:
             logging.warning("Received empty peer list.")
-
 
     async def reconnect_to_peer(self, host, port):
         peer_identifier = f"{host}:{port}"
