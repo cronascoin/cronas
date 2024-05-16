@@ -12,7 +12,6 @@ import ipaddress
 import aiofiles
 import requests
 import random
-from functools import partial
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
@@ -499,9 +498,7 @@ class Peer:
 
     async def send_peer_list(self, writer):
         logging.info("Attempting to send peer list...")
-        peer_list = list(self.active_peers.keys())
-
-        if peer_list:
+        if peer_list := list(self.active_peers.keys()):
             peer_list_message = {
                 "type": "peer_list",
                 "payload": peer_list,
