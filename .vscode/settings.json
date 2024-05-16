@@ -10,6 +10,7 @@
         "cronas",
         "DGRAM",
         "EADDRINUSE",
+        "heartbeatlogging",
         "levelname",
         "maxpeers",
         "peername",
