@@ -11,6 +11,7 @@
         "DGRAM",
         "EADDRINUSE",
         "levelname",
+        "maxpeers",
         "peername",
         "REUSEADDR",
         "REUSEPORT",

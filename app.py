@@ -28,6 +28,7 @@ def load_config(config_path='cronas.conf'):
             'server_id': str(uuid.uuid4()),
             'rpc_port': '4334',
             'p2p_port': '4333',
+            'maxpeers': 10,
             'addnode': ['137.184.80.215:4333'],  # Example seed node
             'rpc_password': generate_password()
         }
@@ -80,13 +81,15 @@ async def main():
     rpc_password = config.get('rpc_password')
     rpc_port = int(config.get('rpc_port', 4334))
     p2p_port = int(config.get('p2p_port', 4333))
+    max_peers = int(config.get('maxpeers', 10))  # Get maxpeers from config, default to 10
     addnodes = config.get('addnode', [])
 
-    peer = Peer('0.0.0.0', p2p_port, server_id, version)
+    peer = Peer('0.0.0.0', p2p_port, server_id, version, max_peers)
     rpc_server = RPCServer(peer, '127.0.0.1', rpc_port, rpc_password)
 
     tasks = [
-        peer.start_p2p_server(),
+        #peer.start_p2p_server(),
+        peer.start(),
         rpc_server.start_rpc_server(),
         *(peer.connect_to_peer(seed.split(':')[0], int(seed.split(':')[1])) for seed in addnodes)
     ]
