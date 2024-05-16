@@ -433,6 +433,25 @@ class Peer:
         else:
             logging.warning("Received empty peer list.")
 
+    def is_valid_peer(self, peer_info):
+        try:
+            ip, port = peer_info.split(':')
+            # Validate IP address
+            ipaddress.ip_address(ip)
+
+            # Ensure the IP address is not one of the local/server addresses
+            if ip in [self.host, self.external_ip, self.out_ip, "127.0.0.1", "localhost"]:
+                logging.info(f"Skipping self-peer with IP: {ip}")
+                return False
+
+            port = int(port)  # Validate that port is an integer
+            # Ephemeral ports typically range from 32768 to 65535; adjust if your range differs
+            return not (32768 <= port <= 65535)
+        except ValueError as e:
+            logging.error(f"Invalid peer address '{peer_info}': {e}")
+            return False
+
+
     async def reconnect_to_peer(self, host, port):
         peer_identifier = f"{host}:{port}"
         logging.info(f"Attempting to reconnect to {peer_identifier}")
@@ -513,7 +532,7 @@ class Peer:
 
         async with self.file_lock:
             try:
-                valid_peers = dict(self.peers.items())
+                valid_peers = {peer_info: last_seen for peer_info, last_seen in self.peers.items() if self.is_valid_peer(peer_info)}
                 async with aiofiles.open("peers.dat", "w") as f:
                     for peer_info, last_seen in valid_peers.items():
                         await f.write(f"{peer_info}:{last_seen}\n")
