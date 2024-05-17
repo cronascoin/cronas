@@ -283,6 +283,7 @@ class Peer:
         if peer_info in self.active_peers:
             del self.active_peers[peer_info]
             logging.info(f"Removed {peer_info} from active peers due to disconnection or error.")
+            await self.schedule_reconnect(peer_info)
 
     async def handle_peer_connection(self, reader, writer):
         peer_address = writer.get_extra_info('peername')
@@ -429,7 +430,7 @@ class Peer:
                 except Exception as e:
                     logging.error(f"Reconnection attempt {attempt} to {peer_identifier} failed: {e}")
             else:
-                logging.info(f"Already connected to or attempting to connect to {peer_identifier}. No need to reconnect.")
+                logging.info(f"Attempting to reconnect to {peer_identifier}.")
                 break
 
     async def request_peer_list(self, writer, peer_info):
@@ -612,3 +613,28 @@ class Peer:
 
         # Close all active connections
         await asyncio.gather(*[self.close_connection(*peer.split(':')) for peer in self.connections.keys()])
+
+    async def schedule_reconnect(self, peer_info):
+        """Schedule reconnection attempts for a peer with exponential backoff."""
+        retry_intervals = [60, 3600, 86400, 2592000]  # Retry intervals: 1 min, 1 hour, 1 day, 1 month
+        base_delay = retry_intervals[0]
+        attempt = 0
+
+        while attempt < len(retry_intervals):
+            jitter = random.uniform(0.8, 1.2)
+            backoff_time = base_delay * jitter
+            logging.info(f"Scheduling reconnection attempt for {peer_info} in {backoff_time:.2f} seconds.")
+            await asyncio.sleep(backoff_time)
+
+            try:
+                host, port = peer_info.split(':')
+                await self.connect_to_peer(host, int(port))
+                logging.info(f"Reconnected to {peer_info} successfully.")
+                break  # Exit loop on successful reconnection
+            except Exception as e:
+                logging.error(f"Reconnection attempt to {peer_info} failed: {e}")
+                attempt += 1
+                if attempt < len(retry_intervals):
+                    base_delay = retry_intervals[attempt]  # Update base delay for next attempt
+                else:
+                    logging.info(f"Max reconnection attempts reached for {peer_info}. Giving up.")
