@@ -477,7 +477,7 @@ class Peer:
                 valid_peers = {
                     peer_info: last_seen
                     for peer_info, last_seen in self.peers.items()
-                    if self.is_valid_peer(peer_info)
+                    if self.is_valid_peer(peer_info) and last_seen != 0
                 }
                 async with aiofiles.open("peers.dat", "w") as f:
                     for peer_info, last_seen in valid_peers.items():
@@ -547,7 +547,7 @@ class Peer:
             asyncio.create_task(self.connect_and_maintain())
         finally:
             self.shutdown_flag = True
-            await asyncio.gather(*[self.close_connection(*peer.split(':')) for peer in self.connections.keys()])
+            await self.cleanup_and_rewrite_peers()
             await self.close_p2p_server()
 
     async def start_p2p_server(self):
@@ -590,7 +590,7 @@ class Peer:
                     valid_peers = {
                         peer_info: last_seen
                         for peer_info, last_seen in self.peers.items()
-                        if self.is_valid_peer(peer_info)
+                        if self.is_valid_peer(peer_info) and last_seen != 0
                     }
                     async with aiofiles.open("peers.dat", "w") as f:
                         for peer_info, last_seen in valid_peers.items():
@@ -602,3 +602,13 @@ class Peer:
                 except Exception as e:
                     logging.error(f"Failed to rewrite peers.dat: {e}")
         self.file_write_scheduled = False
+
+    async def cleanup_and_rewrite_peers(self):
+        """Cleanup peers with last_seen of 0 and rewrite the peers file."""
+        # Filter out peers with last_seen of 0
+        self.peers = {peer_info: last_seen for peer_info, last_seen in self.peers.items() if last_seen != 0}
+        self.peers_changed = True  # Mark that peers have changed
+        await self.rewrite_peers_file()  # Rewrite peers file
+
+        # Close all active connections
+        await asyncio.gather(*[self.close_connection(*peer.split(':')) for peer in self.connections.keys()])
