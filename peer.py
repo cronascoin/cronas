@@ -136,7 +136,8 @@ class Peer:
                     'addrlocal': f"{self.out_ip}:{local_port}",
                     'addrbind': f"{self.external_ip}:{local_port}",
                     'server_id': self.server_id,
-                    'version': self.version
+                    'version': self.version,
+                    'lastseen': int(time.time())
                 }
                 asyncio.create_task(self.listen_for_messages(reader, writer))
                 asyncio.create_task(self.send_heartbeat(writer, peer_info))
@@ -190,7 +191,8 @@ class Peer:
             "addrlocal": addrlocal,
             "addrbind": addrbind,
             "server_id": remote_server_id,
-            "version": remote_version
+            "version": remote_version,
+            "lastseen": int(time.time())
         }
         logging.info(f"Connection fully established with {peer_info}, version {remote_version}")
         self.mark_peer_changed()
@@ -219,6 +221,7 @@ class Peer:
             writer.write(json.dumps(ack_message).encode() + b'\n')
             await writer.drain()
             logging.info(f"Handshake acknowledged to {peer_info}")
+            self.active_peers[peer_info]['lastseen'] = int(time.time())
             asyncio.create_task(self.send_heartbeat(writer))
         else:
             logging.error("Invalid or missing listening port in handshake message.")
@@ -469,7 +472,7 @@ class Peer:
         peer_info_str = f"{peer_info[0]}:{peer_info[1]}"
         
         if peer_info_str in self.active_peers:
-            self.active_peers[peer_info_str]['last_seen'] = int(time.time())
+            self.active_peers[peer_info_str]['lastseen'] = int(time.time())
             logging.info(f"Updated last seen for {peer_info_str}")
 
         ack_message = {

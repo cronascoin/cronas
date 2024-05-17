@@ -34,7 +34,7 @@ class RPCServer:
     async def start_rpc_server(self):
         self.app.add_routes([
             web.post('/addnode', self.add_node),  # Register the route for adding a node
-            web.get('/peers', self.get_peers)     # Route to get active peers
+            web.get('/getpeerinfo', self.get_peer_info)     # Route to get active peers
         ])
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
@@ -47,16 +47,17 @@ class RPCServer:
             await self.runner.cleanup()
             logging.info("RPC Server closed.")
 
-    async def get_peers(self, request):
+    async def get_peer_info(self, request):
         try:
             logging.info("Fetching active peers...")
             active_peers_list = [
                 {
                     "server_id": peer_details['server_id'],
+                    "version": peer_details.get('version', 'unknown'),  # Providing default if not present
                     "addr": peer_details.get('addr', 'unknown'),
                     "addrlocal": peer_details.get('addrlocal', 'unknown'),
                     "addrbind": peer_details.get('addrbind', 'unknown'),
-                    "version": peer_details.get('version', 'unknown')  # Providing default if not present
+                    "lastseen": peer_details.get('lastseen', 'unknown')
                 }
                 for peer_details in self.peer.active_peers.values()
             ]
@@ -81,13 +82,15 @@ class RPCServer:
             server_id = data['server_id']
             version = data['version']
             peer_info = f"{addr}"
-            self.peer.peers[peer_info] = int(time.time())
+            current_time = int(time.time())
+            self.peer.peers[peer_info] = current_time
             self.peer.active_peers[peer_info] = {
                 'addr': addr,
                 'addrlocal': addrlocal,
                 'addrbind': addrbind,
                 'server_id': server_id,
-                'version': version
+                'version': version,
+                'lastseen': current_time
             }
             self.peer.mark_peer_changed()
             await self.peer.rewrite_peers_file()

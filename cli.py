@@ -7,8 +7,8 @@ import json
 
 RPC_SERVER = "http://localhost:4334"
 
-def get_peers():
-    response = requests.get(f"{RPC_SERVER}/peers")
+def get_peer_info():
+    response = requests.get(f"{RPC_SERVER}/getpeerinfo")
     if response.status_code == 200:
         print("Peers List:")
         peers = response.json()
@@ -45,7 +45,7 @@ def add_node(addr, addrlocal, addrbind, server_id, version):
 def display_help():
     print("Usage:")
     print("  cli.py addnode <addr> <addrlocal> <addrbind> <server_id> <version>  Add a new node")
-    print("  cli.py peers                 Retrieve and display the list of peers in JSON format")
+    print("  cli.py getpeerinfo                 Retrieve and display the list of peers in JSON format")
     print("  cli.py transaction <sender> <receiver> <amount>  Send a transaction")
     print("  cli.py help                  Display this help message")
     print("  cli.py --help                Display this help message")
@@ -57,8 +57,8 @@ def main():
 
     command = sys.argv[1]
 
-    if command == "peers":
-        get_peers()
+    if command == "getpeerinfo":
+        get_peer_info()
     elif command == "transaction" and len(sys.argv) == 5:
         _, _, sender, receiver, amount = sys.argv
         send_transaction(sender, receiver, amount)
