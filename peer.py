@@ -286,32 +286,30 @@ class Peer:
 
     async def handle_peer_connection(self, reader, writer):
         peer_address = writer.get_extra_info('peername')
+        peer_info = f"{peer_address[0]}:{peer_address[1]}"
 
+        # If already connected, close the new connection
+        if peer_info in self.connections:
+            logging.info(f"Duplicate connection attempt to {peer_info}. Closing new connection.")
+            writer.close()
+            await writer.wait_closed()
+            return
+
+        self.connections[peer_info] = (reader, writer)
+        
         try:
             buffer = ''
             while True:
-                try:
-                    data = await reader.read(1024)
-                    if not data:
-                        break
-
-                    buffer += data.decode()
-                    while '\n' in buffer:
-                        message, buffer = buffer.split('\n', 1)
-                        if message:
-                            message_obj = json.loads(message)
-                            await self.process_message(message_obj, writer)
-
-                            if message_obj.get('type') == 'hello' and 'listening_port' in message_obj:
-                                host, port = peer_address
-                                peer_info = f"{host}:{message_obj['listening_port']}"
-                                if peer_info not in self.peers:
-                                    self.peers[peer_info] = int(time.time())
-                                    await self.schedule_rewrite()
-
-                except ConnectionResetError:
-                    logging.warning(f"Connection reset by peer {peer_address}. Attempting to handle gracefully.")
+                data = await reader.read(1024)
+                if not data:
                     break
+
+                buffer += data.decode()
+                while '\n' in buffer:
+                    message, buffer = buffer.split('\n', 1)
+                    if message:
+                        message_obj = json.loads(message)
+                        await self.process_message(message_obj, writer)
 
         except asyncio.CancelledError:
             logging.info(f"Connection task with {peer_address} cancelled")
@@ -324,6 +322,7 @@ class Peer:
                 writer.close()
                 await writer.wait_closed()
             logging.info(f"Connection with {peer_address} closed.")
+            await self.handle_disconnection(peer_info)
 
     async def listen_for_messages(self, reader, writer):
         addr = writer.get_extra_info('peername')
@@ -337,9 +336,7 @@ class Peer:
                     logging.info("Connection closed by peer.")
                     break
                 message = json.loads(data_buffer.decode().strip())
-                self.peers[peer_info] = int(time.time())
                 await self.process_message(message, writer)
-                await self.schedule_rewrite()
         except asyncio.IncompleteReadError:
             logging.info("Incomplete read error, attempting to reconnect...")
             await self.handle_disconnection(peer_info)
@@ -397,7 +394,6 @@ class Peer:
     async def process_message(self, message, writer):
         addr = writer.get_extra_info('peername')
         peer_info = f"{addr[0]}:{addr[1]}"
-        await self.update_last_seen(peer_info)
         logging.info(f"Received message from {peer_info}: {message}")
 
         message_type = message.get("type")
