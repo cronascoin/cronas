@@ -249,6 +249,10 @@ class Peer:
                 host, port = peer_info.split(':')
                 port = int(port)
 
+                if peer_info in self.connections:
+                    logging.info(f"Already connected to {peer_info}, skipping additional connection attempt.")
+                    continue
+
                 while len(self.connection_attempts) >= self.max_peers:
                     await asyncio.sleep(1)
 
