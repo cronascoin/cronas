@@ -1,5 +1,5 @@
 # Copyright 2024 cronas.org
-# peer.py
+# peers.py
 
 import asyncio
 import errno
@@ -107,6 +107,10 @@ class Peer:
             self.connection_attempts[peer_info] = 0
 
         while peer_info in self.connection_attempts and self.connection_attempts[peer_info] < max_retries:
+            if self.shutdown_flag:
+                logging.info(f"Shutdown in progress, cancelling connection attempts to {peer_info}.")
+                return
+
             try:
                 reader, writer = await asyncio.open_connection(host, port)
                 local_addr, local_port = writer.get_extra_info('sockname')
@@ -123,7 +127,6 @@ class Peer:
                 writer.write(json.dumps(handshake_msg).encode() + b'\n')
                 await writer.drain()
 
-                # Request peer list only on the first connection attempt
                 if peer_info not in self.connections:
                     await self.request_peer_list(writer, peer_info)
 
@@ -138,7 +141,6 @@ class Peer:
                 asyncio.create_task(self.listen_for_messages(reader, writer))
                 asyncio.create_task(self.send_heartbeat(writer, peer_info))
 
-                # Update last_seen only when successfully connected
                 self.peers[peer_info] = int(time.time())
                 self.peers_changed = True
                 await self.schedule_rewrite()
@@ -238,7 +240,6 @@ class Peer:
         for invalid_peer in invalid_peers:
             logging.warning(f"Invalid peer received: {invalid_peer}")
 
-        # Merge the new valid peers with the existing peers
         self.peers.update(valid_new_peers)
         if valid_new_peers:
             self.peers_changed = True
@@ -277,6 +278,9 @@ class Peer:
             return False
 
     async def handle_disconnection(self, peer_info):
+        if self.shutdown_flag:
+            return
+
         if peer_info in self.peers:
             self.peers[peer_info] = int(time.time())
             await self.schedule_rewrite()
@@ -289,7 +293,6 @@ class Peer:
         peer_address = writer.get_extra_info('peername')
         peer_info = f"{peer_address[0]}:{peer_address[1]}"
 
-        # If already connected, close the new connection
         if peer_info in self.connections:
             logging.info(f"Duplicate connection attempt to {peer_info}. Closing new connection.")
             writer.close()
@@ -342,14 +345,18 @@ class Peer:
             logging.info("Incomplete read error, attempting to reconnect...")
             await self.handle_disconnection(peer_info)
             asyncio.create_task(self.reconnect_to_peer(host, int(port)))
+        except ConnectionResetError as e:
+            logging.error(f"Connection reset error with {peer_info}: {e}")
+            await self.handle_disconnection(peer_info)
+            asyncio.create_task(self.reconnect_to_peer(host, int(port)))
         except Exception as e:
             logging.error(f"Error during communication with {peer_info}: {e}")
             await self.handle_disconnection(peer_info)
         finally:
             logging.info(f"Closing connection with {peer_info}")
-            await self.handle_disconnection(peer_info)
-            writer.close()
-            await writer.wait_closed()
+            if not writer.is_closing():
+                writer.close()
+                await writer.wait_closed()
 
     async def load_peers(self):
         loaded_peers_count = 0
@@ -416,21 +423,26 @@ class Peer:
         retry_intervals = [60, 3600, 86400, 2592000]
 
         for attempt, base_delay in enumerate(retry_intervals):
-            if peer_identifier not in self.active_peers and peer_identifier not in self.connection_attempts:
+            if self.shutdown_flag:
+                logging.info(f"Shutdown in progress, cancelling reconnection attempts for {peer_identifier}.")
+                return
+
+            if peer_identifier not in self.active_peers and peer_identifier not in self.peers_connecting:
                 try:
                     jitter = random.uniform(0.8, 1.2)
                     backoff_time = base_delay * jitter
+                    logging.info(f"Scheduling reconnection attempt for {peer_identifier} in {backoff_time:.2f} seconds.")
                     await asyncio.sleep(backoff_time)
 
-                    self.connection_attempts[peer_identifier] = 0
                     await self.connect_to_peer(host, port)
 
-                    logging.info(f"Reconnected to {peer_identifier} successfully.")
-                    break
+                    if peer_identifier in self.active_peers:
+                        logging.info(f"Reconnected to {peer_identifier} successfully.")
+                        break
                 except Exception as e:
                     logging.error(f"Reconnection attempt {attempt} to {peer_identifier} failed: {e}")
             else:
-                logging.info(f"Attempting to reconnect to {peer_identifier}.")
+                logging.info(f"{peer_identifier} is already active or attempting to reconnect.")
                 break
 
     async def request_peer_list(self, writer, peer_info):
@@ -504,6 +516,10 @@ class Peer:
         await asyncio.sleep(60)
         try:
             while not writer.is_closing():
+                if self.shutdown_flag:
+                    logging.info("Shutdown in progress, stopping heartbeat.")
+                    return
+
                 heartbeat_msg = {
                     "type": "heartbeat",
                     "payload": "ping",
@@ -606,21 +622,23 @@ class Peer:
 
     async def cleanup_and_rewrite_peers(self):
         """Cleanup peers with last_seen of 0 and rewrite the peers file."""
-        # Filter out peers with last_seen of 0
         self.peers = {peer_info: last_seen for peer_info, last_seen in self.peers.items() if last_seen != 0}
-        self.peers_changed = True  # Mark that peers have changed
-        await self.rewrite_peers_file()  # Rewrite peers file
+        self.peers_changed = True
+        await self.rewrite_peers_file()
 
-        # Close all active connections
         await asyncio.gather(*[self.close_connection(*peer.split(':')) for peer in self.connections.keys()])
 
     async def schedule_reconnect(self, peer_info):
         """Schedule reconnection attempts for a peer with exponential backoff."""
-        retry_intervals = [60, 3600, 86400, 2592000]  # Retry intervals: 1 min, 1 hour, 1 day, 1 month
+        retry_intervals = [60, 3600, 86400, 2592000]
         base_delay = retry_intervals[0]
         attempt = 0
 
         while attempt < len(retry_intervals):
+            if self.shutdown_flag:
+                logging.info(f"Shutdown in progress, cancelling reconnection attempts for {peer_info}.")
+                return
+
             jitter = random.uniform(0.8, 1.2)
             backoff_time = base_delay * jitter
             logging.info(f"Scheduling reconnection attempt for {peer_info} in {backoff_time:.2f} seconds.")
@@ -630,11 +648,11 @@ class Peer:
                 host, port = peer_info.split(':')
                 await self.connect_to_peer(host, int(port))
                 logging.info(f"Reconnected to {peer_info} successfully.")
-                break  # Exit loop on successful reconnection
+                break
             except Exception as e:
                 logging.error(f"Reconnection attempt to {peer_info} failed: {e}")
                 attempt += 1
                 if attempt < len(retry_intervals):
-                    base_delay = retry_intervals[attempt]  # Update base delay for next attempt
+                    base_delay = retry_intervals[attempt]
                 else:
                     logging.info(f"Max reconnection attempts reached for {peer_info}. Giving up.")

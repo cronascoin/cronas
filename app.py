@@ -9,18 +9,24 @@ import uuid
 import string
 import random
 import logging
+import subprocess
 from peer import Peer
 from rpc import RPCServer
 
-version = '0.0.1'
-
 logging.basicConfig(level=logging.INFO)
-
 
 def generate_password(length=12):
     characters = string.ascii_letters + string.digits + string.punctuation
     return ''.join(random.choice(characters) for _ in range(length))
 
+def get_short_commit_hash():
+    result = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode == 0:
+        return result.stdout.strip()
+    else:
+        raise RuntimeError(f"Git command failed with error: {result.stderr}")
+
+version = f'0.0.1-{get_short_commit_hash()}'
 
 def load_config(config_path='cronas.conf', default_p2p_port=4333): # Added default_p2p_port parameter
     config = {}
