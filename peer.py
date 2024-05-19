@@ -211,16 +211,18 @@ class Peer:
         asyncio.create_task(self.send_heartbeat(writer))
 
     async def handle_hello_message(self, message, writer):
-        required_keys = ['host', 'port']
+        required_keys = ['host', 'port', 'server_id']
 
         # Check if the required keys are present in the message
-        if not all(key in message for key in required_keys):
+        if any(key not in message for key in required_keys):
             logging.error(f"HELLO message missing required keys: {message}")
+            logging.debug(f"Full message received: {message}")
             writer.close()
             await writer.wait_closed()
             return
 
         peer_info = f"{message['host']}:{message['port']}"
+        server_id = message['server_id']
         current_time = int(time.time())
 
         # Check if the peer is already in active_peers, if not, initialize it
@@ -228,6 +230,7 @@ class Peer:
             self.active_peers[peer_info] = {
                 'host': message['host'],
                 'port': message['port'],
+                'server_id': server_id,
                 'version': message.get('version', 'unknown'),
                 'lastseen': current_time
             }
@@ -236,11 +239,12 @@ class Peer:
             self.active_peers[peer_info]['lastseen'] = current_time
 
         # Log the connection and send a response message
-        logging.info(f"Received HELLO from {peer_info}")
+        logging.info(f"Received HELLO from {peer_info} with server_id {server_id}")
         response_message = {
             'type': 'HELLO',
             'host': self.host,
             'port': self.port,
+            'server_id': self.server_id,
             'version': self.version
         }
         await self.send_message(writer, response_message)
