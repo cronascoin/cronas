@@ -221,13 +221,12 @@ class Peer:
             await writer.wait_closed()
             return
 
-        peer_info = f"{message['host']}:{message['port']}"
         server_id = message['server_id']
         current_time = int(time.time())
 
         # Check if the peer is already in active_peers, if not, initialize it
-        if peer_info not in self.active_peers:
-            self.active_peers[peer_info] = {
+        if server_id not in self.active_peers:
+            self.active_peers[server_id] = {
                 'host': message['host'],
                 'port': message['port'],
                 'server_id': server_id,
@@ -236,10 +235,10 @@ class Peer:
             }
         else:
             # Update the last seen time if the peer is already in active_peers
-            self.active_peers[peer_info]['lastseen'] = current_time
+            self.active_peers[server_id]['lastseen'] = current_time
 
         # Log the connection and send a response message
-        logging.info(f"Received HELLO from {peer_info} with server_id {server_id}")
+        logging.info(f"Received HELLO from {server_id} ({message['host']}:{message['port']})")
         response_message = {
             'type': 'HELLO',
             'host': self.host,
@@ -248,7 +247,7 @@ class Peer:
             'version': self.version
         }
         await self.send_message(writer, response_message)
-        
+      
     async def handle_peer_list_message(self, message):
         new_peers = message.get("payload", [])
         logging.info("Processing new peer list...")
