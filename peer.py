@@ -82,7 +82,7 @@ class Peer:
         self.peers_connecting.update(peers_to_connect)
 
         tasks = [asyncio.create_task(self.connect_to_peer(host, int(port)))
-        for host, port in (peer.split(':') for peer in peers_to_connect)]
+                 for host, port in (peer.split(':') for peer in peers_to_connect)]
         try:
             await asyncio.gather(*tasks, return_exceptions=True)
         finally:
@@ -209,33 +209,33 @@ class Peer:
         self.mark_peer_changed()
         await self.schedule_rewrite()
         asyncio.create_task(self.send_heartbeat(writer))
-        
 
     async def handle_hello_message(self, message, writer):
-        peer_info = f"{message['host']}:{message['port']}"
-        current_time = int(time.time())
-
-        # Check if the peer is already in active_peers, if not, initialize it
-        if peer_info not in self.active_peers:
-            self.active_peers[peer_info] = {
-                'host': message['host'],
-                'port': message['port'],
-                'version': message.get('version', 'unknown'),
-                'lastseen': current_time
+        addr = writer.get_extra_info('peername')
+        peer_info = f"{addr[0]}:{addr[1]}"
+        
+        if 'listening_port' in message and isinstance(message['listening_port'], int):
+            peer_port = message['listening_port']
+            peer_info = f"{addr[0]}:{peer_port}"
+            if peer_info not in self.peers:
+                self.peers[peer_info] = int(time.time())
+                logging.info(f"Added new peer {peer_info}.")
+                self.mark_peer_changed()
+                await self.schedule_rewrite()
+            
+            ack_message = {
+                "type": "ack",
+                "payload": "Handshake acknowledged",
+                "version": self.version, 
+                "server_id": self.server_id
             }
+            writer.write(json.dumps(ack_message).encode() + b'\n')
+            await writer.drain()
+            logging.info(f"Handshake acknowledged to {peer_info}")
+            self.active_peers[peer_info]['lastseen'] = int(time.time())
+            asyncio.create_task(self.send_heartbeat(writer))
         else:
-            # Update the last seen time if the peer is already in active_peers
-            self.active_peers[peer_info]['lastseen'] = current_time
-
-        # Log the connection and send a response message
-        logging.info(f"Received HELLO from {peer_info}")
-        response_message = {
-            'type': 'HELLO',
-            'host': self.host,
-            'port': self.port,
-            'version': self.version
-        }
-        await self.send_message(writer, response_message)
+            logging.error("Invalid or missing listening port in handshake message.")
 
     async def handle_peer_list_message(self, message):
         new_peers = message.get("payload", [])
