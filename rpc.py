@@ -49,7 +49,8 @@ class RPCServer:
 
     async def get_peer_info(self, request):
         try:
-            logging.info("Fetching active peers...")
+            logging.info("Fetching peer information...")
+            uptime = self.peer.get_uptime()
             active_peers_list = [
                 {
                     "server_id": peer_details['server_id'],
@@ -61,12 +62,16 @@ class RPCServer:
                 }
                 for peer_details in self.peer.active_peers.values()
             ]
-            logging.debug(f"Prepared peers list for JSON serialization: {active_peers_list}")
-            json_response = json.dumps(active_peers_list)
+            response = {
+                "uptime": uptime,
+                "connected_peers": active_peers_list
+            }
+            logging.debug(f"Prepared response for JSON serialization: {response}")
+            json_response = json.dumps(response)
             logging.debug(f"Serialized JSON response: {json_response}")
             return web.Response(text=json_response, content_type='application/json')
         except Exception as e:
-            logging.error(f"Error fetching peers: {e}")
+            logging.error(f"Error fetching peer information: {e}")
             return web.Response(status=500, text=json.dumps({"error": "Internal server error"}))
 
     async def add_node(self, request):

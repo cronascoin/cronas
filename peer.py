@@ -2,6 +2,7 @@
 # peers.py
 
 import asyncio
+import datetime
 import errno
 import json
 import logging
@@ -14,6 +15,8 @@ import requests
 import random
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
+debug = False
 
 class Peer:
     def __init__(self, host, p2p_port, server_id, version, max_peers=10, config=None):
@@ -41,6 +44,8 @@ class Peer:
         self.config = config
         self.heartbeatlogging = config.get('heartbeatlogging', True) if config else True
         self.last_peer_list_request = {}  # Track last peer list request times
+        self.start_time = datetime.datetime.now()  # Add start time
+        
 
     def is_private_ip(self, ip):
         return ipaddress.ip_address(ip).is_private
@@ -175,6 +180,12 @@ class Peer:
             logging.error(f"Failed to detect external IP address: {e}")
             return '127.0.0.1'
 
+    def get_uptime(self):
+        """Calculate and return the uptime in seconds."""
+        current_time = datetime.datetime.now()
+        uptime = current_time - self.start_time
+        return uptime.total_seconds()
+    
     async def handle_ack_message(self, message, writer):
         addr = writer.get_extra_info('peername')
         peer_info = f"{addr[0]}:{addr[1]}"
@@ -405,8 +416,8 @@ class Peer:
     async def process_message(self, message, writer):
         addr = writer.get_extra_info('peername')
         peer_info = f"{addr[0]}:{addr[1]}"
-        logging.info(f"Received message from {peer_info}: {message}")
-
+        if debug: 
+            logging.info(f"Received message from {peer_info}: {message}")
         message_type = message.get("type")
         if message_type == "hello":
             await self.handle_hello_message(message, writer)
