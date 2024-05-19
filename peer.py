@@ -16,7 +16,7 @@ import random
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
-debug = True
+debug = False
 
 class Peer:
     def __init__(self, host, p2p_port, server_id, version, max_peers=10, config=None):
@@ -82,7 +82,7 @@ class Peer:
         self.peers_connecting.update(peers_to_connect)
 
         tasks = [asyncio.create_task(self.connect_to_peer(host, int(port)))
-                 for host, port in (peer.split(':') for peer in peers_to_connect)]
+        for host, port in (peer.split(':') for peer in peers_to_connect)]
         try:
             await asyncio.gather(*tasks, return_exceptions=True)
         finally:
@@ -120,17 +120,8 @@ class Peer:
                 reader, writer = await asyncio.open_connection(host, port)
                 local_addr, local_port = writer.get_extra_info('sockname')
 
-                handshake_msg = {
-                    "type": "hello",
-                    "payload": f"Hello from {self.host}",
-                    "version": self.version,
-                    "seq": self.hello_seq + 1,
-                    "server_id": self.server_id,
-                    "listening_port": self.p2p_port
-                }
-
-                writer.write(json.dumps(handshake_msg).encode() + b'\n')
-                await writer.drain()
+                # Send HELLO message
+                await self.send_hello_message(writer)
 
                 if peer_info not in self.connections:
                     await self.request_peer_list(writer, peer_info)
@@ -160,6 +151,7 @@ class Peer:
         if peer_info in self.connection_attempts:
             logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
             self.connection_attempts.pop(peer_info, None)
+
 
     def detect_ip_address(self):
         try:
@@ -558,6 +550,22 @@ class Peer:
             logging.info("Heartbeat sending cancelled.")
         except Exception as e:
             logging.error(f"Error sending heartbeat: {e}")
+
+    async def send_hello_message(self, writer):
+        hello_message = {
+            'type': 'HELLO',
+            'host': self.host,
+            'port': self.p2p_port,  # Use p2p_port here
+            'server_id': self.server_id,
+            'version': self.version
+        }
+        await self.send_message(writer, hello_message)
+        logging.info(f"Sent HELLO message: {hello_message}")
+
+    async def send_message(self, writer, message):
+        message_data = json.dumps(message).encode('utf-8')
+        writer.write(message_data + b'\n')
+        await writer.drain()
 
     async def send_peer_list(self, writer):
         logging.info("Attempting to send peer list...")
