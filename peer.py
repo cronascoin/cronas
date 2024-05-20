@@ -183,7 +183,6 @@ class Peer:
         peer_info = f"{addr[0]}:{addr[1]}"
         remote_version = message.get("version", "unknown")
         remote_server_id = message.get("server_id", "unknown")
-
         local_addr, local_port = writer.get_extra_info('sockname')
 
         addrlocal = f"{self.out_ip}:{local_port}"
@@ -211,8 +210,7 @@ class Peer:
         self.mark_peer_changed()
         await self.schedule_rewrite()
         asyncio.create_task(self.send_heartbeat(writer))
-
-
+        
     async def handle_disconnection(self, peer_info):
         if self.shutdown_flag:
             return
@@ -232,11 +230,6 @@ class Peer:
         if 'listening_port' in message and isinstance(message['listening_port'], int):
             peer_port = message['listening_port']
             peer_info = f"{addr[0]}:{peer_port}"
-            if peer_info not in self.peers:
-                self.peers[peer_info] = int(time.time())
-                logging.info(f"Added new peer {peer_info}.")
-                self.mark_peer_changed()
-                await self.schedule_rewrite()
 
             ack_message = {
                 "type": "ack",
@@ -249,14 +242,18 @@ class Peer:
             logging.info(f"Handshake acknowledged to {peer_info}")
 
             # Update the active peer's details
-            self.active_peers[peer_info].update({
+            self.active_peers[peer_info] = {
+                "addr": peer_info,
+                "addrlocal": f"{self.out_ip}:{addr[1]}",
+                "addrbind": f"{self.external_ip}:{addr[1]}",
                 "server_id": message.get('server_id', 'unknown'),
                 "version": message.get('version', 'unknown'),
                 "lastseen": int(time.time())
-            })
+            }
             asyncio.create_task(self.send_heartbeat(writer))
         else:
             logging.error("Invalid or missing listening port in handshake message.")
+
 
     async def handle_peer_connection(self, reader, writer):
         peer_address = writer.get_extra_info('peername')
@@ -575,7 +572,7 @@ class Peer:
 
     async def send_hello_message(self, writer):
         hello_message = {
-            'type': 'HELLO',
+            'type': 'hello',
             'host': self.out_ip,  # Use out_ip here
             'port': self.p2p_port,  # Use p2p_port
             'server_id': self.server_id,
@@ -583,7 +580,7 @@ class Peer:
         }
         await self.send_message(writer, hello_message)
         if self.debug:
-            logging.info(f"Sent HELLO message: {hello_message}")
+            logging.info(f"Sent hello message: {hello_message}")
 
     async def send_message(self, writer, message):
         message_data = json.dumps(message).encode('utf-8')

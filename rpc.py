@@ -74,7 +74,6 @@ class RPCServer:
             logging.error(f"Error fetching peer information: {e}")
             return web.Response(status=500, text=json.dumps({"error": "Internal server error"}))
 
-
     async def add_node(self, request):
         try:
             data = await request.json()
