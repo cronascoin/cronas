@@ -71,7 +71,7 @@ def write_config(config, config_path='cronas.conf'):
     except Exception as e:
         logging.error(f"Failed to write to the config file: {e}")
 
-def load_config(config_path='cronas.conf', default_p2p_port=4333):
+def load_config(config_path='cronas.conf'):
     config = read_config(config_path)
 
     if mac_address := get_mac_address():
@@ -99,6 +99,8 @@ def load_config(config_path='cronas.conf', default_p2p_port=4333):
         config['addnode'] = ['137.184.80.215:4333']  # Example seed node
     if 'rpc_password' not in config:
         config['rpc_password'] = generate_password()
+    if 'debug' not in config:
+        config['debug'] = 'false'
 
     return config
 

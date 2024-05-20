@@ -1,4 +1,4 @@
-#Copyright 2024 cronas.org
+# Copyright 2024 cronas.org
 # rpc.py
 
 import time
@@ -53,7 +53,7 @@ class RPCServer:
             uptime = self.peer.get_uptime()
             active_peers_list = [
                 {
-                    "server_id": peer_details['server_id'],
+                    "server_id": peer_details.get('server_id', 'unknown'),
                     "version": peer_details.get('version', 'unknown'),  # Providing default if not present
                     "addr": peer_details.get('addr', 'unknown'),
                     "addrlocal": peer_details.get('addrlocal', 'unknown'),
@@ -73,6 +73,7 @@ class RPCServer:
         except Exception as e:
             logging.error(f"Error fetching peer information: {e}")
             return web.Response(status=500, text=json.dumps({"error": "Internal server error"}))
+
 
     async def add_node(self, request):
         try:
