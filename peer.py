@@ -554,13 +554,14 @@ class Peer:
     async def send_hello_message(self, writer):
         hello_message = {
             'type': 'HELLO',
-            'host': self.host,
-            'port': self.p2p_port,  # Use p2p_port here
+            'host': self.out_ip,  # Use out_ip here
+            'port': self.p2p_port,  # Use p2p_port
             'server_id': self.server_id,
             'version': self.version
         }
         await self.send_message(writer, hello_message)
-        logging.info(f"Sent HELLO message: {hello_message}")
+        if debug:
+            logging.info(f"Sent HELLO message: {hello_message}")
 
     async def send_message(self, writer, message):
         message_data = json.dumps(message).encode('utf-8')
