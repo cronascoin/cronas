@@ -496,7 +496,7 @@ class Peer:
         await writer.drain()
         logging.info(f"Request for peer list sent to {peer_info}.")
 
-    async def respond_to_heartbeat(self, writer):
+    async def respond_to_heartbeat(self, writer, message):
         peer_info = writer.get_extra_info('peername')
         peer_info_str = f"{peer_info[0]}:{peer_info[1]}"
         
@@ -557,7 +557,7 @@ class Peer:
             self.file_write_scheduled = True
             asyncio.create_task(self._rewrite_after_delay())
 
-    async def send_heartbeat(self, writer):
+    async def send_heartbeat(self, writer, peer_info=None):
         await asyncio.sleep(60)
         try:
             while not writer.is_closing():
