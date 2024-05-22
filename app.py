@@ -1,3 +1,6 @@
+# Copyright 2024 cronas.org
+# app.py
+
 import asyncio
 import contextlib
 import os
@@ -8,16 +11,15 @@ import random
 import logging
 import subprocess
 import netifaces
+import requests
 from peer import Peer
 from rpc import RPCServer
 
 logging.basicConfig(level=logging.INFO)
 
-
 def generate_password(length=12):
     characters = string.ascii_letters + string.digits + string.punctuation
     return ''.join(random.choice(characters) for _ in range(length))
-
 
 def get_short_commit_hash():
     result = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -26,9 +28,7 @@ def get_short_commit_hash():
     else:
         raise RuntimeError(f"Git command failed with error: {result.stderr}")
 
-
 version = f'0.0.1-{get_short_commit_hash()}'
-
 
 def get_mac_address():
     interfaces = netifaces.interfaces()
@@ -38,21 +38,19 @@ def get_mac_address():
             return mac_address_info[0]['addr']
     return None
 
-
-def get_ip_address():
-    interfaces = netifaces.interfaces()
-    for interface in interfaces:
-        addresses = netifaces.ifaddresses(interface)
-        if ip_address_info := addresses.get(netifaces.AF_INET):
-            return ip_address_info[0]['addr']
-    return None
-
+def get_out_ip():
+    try:
+        response = requests.get('https://api.ipify.org?format=json')
+        response.raise_for_status()
+        return response.json()['ip']
+    except requests.RequestException as e:
+        logging.error(f"Failed to get public IP address: {e}")
+        return None
 
 def generate_uuid_from_mac_and_ip(mac_address, ip_address):
     namespace = uuid.UUID('00000000-0000-0000-0000-000000000000')
-    combined = (mac_address + ip_address).replace(':', '').replace('-', '').replace('.', '').lower()
+    combined = f"{mac_address.lower()}-{ip_address}"
     return uuid.uuid5(namespace, combined)
-
 
 def read_config(config_path='cronas.conf'):
     config = {}
@@ -70,7 +68,6 @@ def read_config(config_path='cronas.conf'):
             logging.error(f"Failed to read the config file: {e}")
     return config
 
-
 def write_config(config, config_path='cronas.conf'):
     try:
         with open(config_path, 'w') as configfile:
@@ -84,19 +81,18 @@ def write_config(config, config_path='cronas.conf'):
     except Exception as e:
         logging.error(f"Failed to write to the config file: {e}")
 
-
 def load_config(config_path='cronas.conf'):
     config = read_config(config_path)
 
     mac_address = get_mac_address()
-    ip_address = get_ip_address()
-
-    if mac_address and ip_address:
-        generated_uuid = generate_uuid_from_mac_and_ip(mac_address, ip_address)
+    out_ip = get_out_ip()
+    
+    if mac_address and out_ip:
+        generated_uuid = generate_uuid_from_mac_and_ip(mac_address, out_ip)
         correct_server_id = str(generated_uuid)
-        logging.info(f"MAC Address: {mac_address}, IP Address: {ip_address}, Generated UUID: {correct_server_id}")
+        logging.info(f"MAC Address: {mac_address}, Public IP: {out_ip}, Generated UUID: {correct_server_id}")
     else:
-        logging.warning("MAC or IP address could not be found, generating random UUID for server_id.")
+        logging.warning("MAC address or public IP address could not be found, generating random UUID for server_id.")
         correct_server_id = str(uuid.uuid4())
 
     if 'server_id' not in config or config['server_id'] != correct_server_id:
@@ -106,15 +102,20 @@ def load_config(config_path='cronas.conf'):
     else:
         logging.info("Server ID in the config file is correct.")
 
-    config.setdefault('rpc_port', '4334')
-    config.setdefault('p2p_port', '4333')
-    config.setdefault('maxpeers', 10)
-    config.setdefault('addnode', ['137.184.80.215:4333'])  # Example seed node
-    config.setdefault('rpc_password', generate_password())
-    config.setdefault('debug', 'false')
+    if 'rpc_port' not in config:
+        config['rpc_port'] = '4334'
+    if 'p2p_port' not in config:
+        config['p2p_port'] = '4333'
+    if 'maxpeers' not in config:
+        config['maxpeers'] = 10
+    if 'addnode' not in config:
+        config['addnode'] = ['137.184.80.215:4333']  # Example seed node
+    if 'rpc_password' not in config:
+        config['rpc_password'] = generate_password()
+    if 'debug' not in config:
+        config['debug'] = 'false'
 
     return config
-
 
 async def shutdown(peer, rpc_server):
     logging.info("Shutting down...")
@@ -122,15 +123,14 @@ async def shutdown(peer, rpc_server):
         await peer.close_p2p_server()
     except Exception as e:
         logging.error(f"Error closing P2P server: {e}")
-
+    
     try:
         await rpc_server.close_rpc_server()
     except Exception as e:
         logging.error(f"Error closing RPC server: {e}")
-
+    
     await cancel_remaining_tasks()
     logging.info("Shutdown complete.")
-
 
 async def cancel_remaining_tasks():
     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
@@ -139,7 +139,6 @@ async def cancel_remaining_tasks():
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
-
 
 async def main():
     config = load_config()
@@ -170,7 +169,6 @@ async def main():
         logging.error(f"Error during execution: {e}")
     finally:
         await shutdown(peer, rpc_server)
-
 
 if __name__ == '__main__':
     try:
