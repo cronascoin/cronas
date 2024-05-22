@@ -38,15 +38,6 @@ def get_mac_address():
             return mac_address_info[0]['addr']
     return None
 
-def get_out_ip():
-    try:
-        response = requests.get('https://api.ipify.org?format=json')
-        response.raise_for_status()
-        return response.json()['ip']
-    except requests.RequestException as e:
-        logging.error(f"Failed to get public IP address: {e}")
-        return None
-
 def generate_uuid_from_mac_and_ip(mac_address, ip_address):
     namespace = uuid.UUID('00000000-0000-0000-0000-000000000000')
     combined = f"{mac_address.lower()}-{ip_address}"
@@ -81,6 +72,15 @@ def write_config(config, config_path='cronas.conf'):
     except Exception as e:
         logging.error(f"Failed to write to the config file: {e}")
 
+def get_out_ip():
+    try:
+        response = requests.get('https://api.ipify.org?format=json')
+        response.raise_for_status()
+        return response.json()['ip']
+    except requests.RequestException as e:
+        logging.error(f"Failed to get public IP address: {e}")
+        return None
+
 def load_config(config_path='cronas.conf'):
     config = read_config(config_path)
 
@@ -95,25 +95,31 @@ def load_config(config_path='cronas.conf'):
         logging.warning("MAC address or public IP address could not be found, generating random UUID for server_id.")
         correct_server_id = str(uuid.uuid4())
 
+    config_changed = False
+
     if 'server_id' not in config or config['server_id'] != correct_server_id:
         config['server_id'] = correct_server_id
-        write_config(config, config_path)
-        logging.info("Server ID has been updated in the config file.")
-    else:
-        logging.info("Server ID in the config file is correct.")
+        config_changed = True
 
-    if 'rpc_port' not in config:
-        config['rpc_port'] = '4334'
-    if 'p2p_port' not in config:
-        config['p2p_port'] = '4333'
-    if 'maxpeers' not in config:
-        config['maxpeers'] = 10
-    if 'addnode' not in config:
-        config['addnode'] = ['137.184.80.215:4333']  # Example seed node
-    if 'rpc_password' not in config:
-        config['rpc_password'] = generate_password()
-    if 'debug' not in config:
-        config['debug'] = 'false'
+    default_config = {
+        'rpc_port': '4334',
+        'p2p_port': '4333',
+        'maxpeers': 10,
+        'addnode': ['137.184.80.215:4333'],  # Example seed node
+        'rpc_password': generate_password(),
+        'debug': 'false'
+    }
+
+    for key, value in default_config.items():
+        if key not in config:
+            config[key] = value
+            config_changed = True
+
+    if config_changed:
+        write_config(config, config_path)
+        logging.info("Configuration updated.")
+    else:
+        logging.info("Configuration is up to date.")
 
     return config
 
