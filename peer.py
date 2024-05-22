@@ -595,10 +595,12 @@ class Peer:
 
     async def send_peer_list(self, writer):
         logging.info("Attempting to send peer list...")
-        if peer_list := list(self.active_peers.keys()):
+        connecting_ports = [peer.split(':')[0] + ':' + peer.split(':')[1] for peer in self.active_peers.keys()]
+        
+        if connecting_ports:
             peer_list_message = {
                 "type": "peer_list",
-                "payload": peer_list,
+                "payload": connecting_ports,
                 "server_id": self.server_id,
                 "version": self.version
             }
@@ -608,6 +610,7 @@ class Peer:
             logging.info("Sent active peer list.")
         else:
             logging.warning("No active peers to send.")
+
 
     async def start(self):
         """Start the peer server and main loop."""
