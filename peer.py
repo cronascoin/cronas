@@ -225,34 +225,40 @@ class Peer:
 
     async def handle_hello_message(self, message, writer):
         addr = writer.get_extra_info('peername')
-        peer_info = f"{addr[0]}:{addr[1]}"
+        host, port = addr[0], addr[1]
 
+        # Extract server_id and version from the hello message
+        remote_server_id = message.get('server_id', 'unknown')
+        remote_version = message.get('version', 'unknown')
+        
+        # Construct peer_info using potential listening_port
         if 'listening_port' in message and isinstance(message['listening_port'], int):
             peer_port = message['listening_port']
             peer_info = f"{addr[0]}:{peer_port}"
-
-            ack_message = {
-                "type": "ack",
-                "payload": "Handshake acknowledged",
-                "version": self.version,
-                "server_id": self.server_id
-            }
-            writer.write(json.dumps(ack_message).encode() + b'\n')
-            await writer.drain()
-            logging.info(f"Handshake acknowledged to {peer_info}")
-
-            # Update the active peer's details
-            self.active_peers[peer_info] = {
-                "addr": peer_info,
-                "addrlocal": f"{self.out_ip}:{addr[1]}",
-                "addrbind": f"{self.external_ip}:{addr[1]}",
-                "server_id": message.get('server_id', 'unknown'),
-                "version": message.get('version', 'unknown'),
-                "lastseen": int(time.time())
-            }
-            asyncio.create_task(self.send_heartbeat(writer))
         else:
-            logging.error("Invalid or missing listening port in handshake message.")
+            peer_info = f"{addr[0]}:{addr[1]}"
+
+        ack_message = {
+            "type": "ack",
+            "payload": "Handshake acknowledged",
+            "version": self.version,
+            "server_id": self.server_id
+        }
+        writer.write(json.dumps(ack_message).encode() + b'\n')
+        await writer.drain()
+        logging.info(f"Handshake acknowledged to {peer_info}")
+
+        # Update the active peer's details
+        self.active_peers[peer_info] = {
+            "addr": peer_info,
+            "addrlocal": f"{self.out_ip}:{addr[1]}",  # Use the actual connection port
+            "addrbind": f"{self.external_ip}:{addr[1]}",  # Use the actual connection port
+            "server_id": remote_server_id,
+            "version": remote_version,
+            "lastseen": int(time.time())
+        }
+
+        asyncio.create_task(self.send_heartbeat(writer))
 
 
     async def handle_peer_connection(self, reader, writer):

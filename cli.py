@@ -28,27 +28,25 @@ def send_transaction(sender, receiver, amount):
     else:
         print("Failed to submit transaction.")
 
-def add_node(addr, addrlocal, addrbind, server_id, version):
+def add_node(addr, port):  # Simplified to take only address and port
     data = {
         "addr": addr,
-        "addrlocal": addrlocal,
-        "addrbind": addrbind,
-        "server_id": server_id,
-        "version": version
+        "listening_port": port
     }
-    response = requests.post(f"{RPC_SERVER}/addnode", json=data)
-    if response.status_code == 200:
-        print("Node added successfully.")
-    else:
-        print(f"Failed to add node: {response.text}")
+    try:
+        response = requests.post(f"{RPC_SERVER}/addnode", json=data)
+        response.raise_for_status()
+        print(response.json()["message"])  # Display the server's response message
+    except requests.RequestException as e:
+        print(f"Error adding node: {e}")
 
 def display_help():
+    print("Cronas P2P Network CLI")
     print("Usage:")
-    print("  cli.py addnode <addr> <addrlocal> <addrbind> <server_id> <version>  Add a new node")
-    print("  cli.py getpeerinfo                 Retrieve and display the list of peers in JSON format")
-    print("  cli.py transaction <sender> <receiver> <amount>  Send a transaction")
-    print("  cli.py help                  Display this help message")
-    print("  cli.py --help                Display this help message")
+    print("  cli.py getpeerinfo               - Get information about connected peers")
+    print("  cli.py transaction <sender> <receiver> <amount>   - Send a transaction")
+    print("  cli.py addnode <addr> <port> - Add a new node by IP address and port")
+    print("  cli.py help                    - Display this help message")
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ["help", "--help"]:
@@ -61,12 +59,16 @@ def main():
         get_peer_info()
     elif command == "transaction" and len(sys.argv) == 5:
         _, _, sender, receiver, amount = sys.argv
-        send_transaction(sender, receiver, amount)
-    elif command == "addnode" and len(sys.argv) == 7:
-        _, _, addr, addrlocal, addrbind, server_id, version = sys.argv
-        add_node(addr, addrlocal, addrbind, server_id, version)
+        send_transaction(sender, receiver, float(amount))  # Convert amount to float
+    elif command == "addnode" and len(sys.argv) == 4:  # Check for correct number of arguments
+        _, _, addr, port = sys.argv
+        try:
+            port = int(port)  # Validate port is an integer
+            add_node(addr, port)
+        except ValueError:
+            print("Invalid port number. Port should be an integer.")
     else:
-        print("Invalid command or arguments.")
+        print("Invalid command or arguments. Use 'cli.py help' for usage.")
 
 if __name__ == '__main__':
     main()

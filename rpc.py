@@ -1,6 +1,8 @@
 # Copyright 2024 cronas.org
 # rpc.py
 
+import asyncio
+import ipaddress
 import time
 from aiohttp import web
 import json
@@ -77,30 +79,37 @@ class RPCServer:
     async def add_node(self, request):
         try:
             data = await request.json()
-            required_fields = ['addr', 'addrlocal', 'addrbind', 'server_id', 'version']
-            if any(field not in data for field in required_fields):
-                return web.Response(status=400, text=json.dumps({"error": "Invalid request"}))
-            
+
+            # More robust validation
+            required_fields = ['addr', 'listening_port']  # Adjusted required fields
+            if not all(field in data for field in required_fields):
+                return web.Response(status=400, text=json.dumps({"error": "Missing required fields"}))
+
             addr = data['addr']
-            addrlocal = data['addrlocal']
-            addrbind = data['addrbind']
-            server_id = data['server_id']
-            version = data['version']
-            peer_info = f"{addr}"
+            port = data['listening_port']  # Use listening_port directly
+
+            # Input validation
+            try:
+                ipaddress.ip_address(addr)  # Validate IP address format
+                if not isinstance(port, int) or not (1 <= port <= 65535):
+                    raise ValueError("Invalid port number")
+            except ValueError as e:
+                return web.Response(status=400, text=json.dumps({"error": str(e)}))
+
+            peer_info = f"{addr}:{port}"
+
+            # Check if peer already exists
+            if peer_info in self.peer.peers:
+                return web.Response(status=409, text=json.dumps({"error": "Peer already exists"}))
+
             current_time = int(time.time())
-            self.peer.peers[peer_info] = current_time
-            self.peer.active_peers[peer_info] = {
-                'addr': addr,
-                'addrlocal': addrlocal,
-                'addrbind': addrbind,
-                'server_id': server_id,
-                'version': version,
-                'lastseen': current_time
-            }
-            self.peer.mark_peer_changed()
-            await self.peer.rewrite_peers_file()
+            self.peer.peers[peer_info] = current_time  # Add to known peers
+
+            # Trigger connection attempt (revised logic for directly adding to active_peers)
+            asyncio.create_task(self.peer.connect_to_peer(addr, port))
+
             return web.Response(
-                text=json.dumps({"message": "Node added successfully"}),
+                text=json.dumps({"message": "Node connection initiated"}),  # Updated message
                 content_type='application/json'
             )
         except json.JSONDecodeError:
@@ -108,5 +117,6 @@ class RPCServer:
         except Exception as e:
             logging.error(f"Error adding node: {e}")
             return web.Response(status=500, text=json.dumps({"error": "Internal server error"}))
+
 
 # Additional methods as needed
