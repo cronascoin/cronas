@@ -149,7 +149,7 @@ class Peer:
         if peer_info in self.connection_attempts:
             logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
             self.connection_attempts.pop(peer_info, None)
-            await self.schedule_reconnect(peer_info)  # Schedule a reconnect attempt
+            return
 
 
     def detect_ip_address(self):
