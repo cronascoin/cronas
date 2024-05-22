@@ -534,8 +534,7 @@ class Peer:
                     for peer_info, last_seen in valid_peers.items():
                         await f.write(f"{peer_info}:{last_seen}\n")
                 self.peers_changed = False
-                if self.debug:
-                    logging.info("Peers file rewritten successfully.")
+                logging.info("Peers file rewritten successfully.")
             except OSError as e:
                 logging.error(f"Failed to open peers.dat: {e}")
             except Exception as e:
@@ -682,7 +681,8 @@ class Peer:
                         for peer_info, last_seen in valid_peers.items():
                             await f.write(f"{peer_info}:{last_seen}\n")
                     self.peers_changed = False
-                    logging.info("Peers file rewritten successfully.")
+                    if self.debug:
+                        logging.info("Peers file rewritten successfully.")
                 except OSError as e:
                     logging.error(f"Failed to open peers.dat: {e}")
                 except Exception as e:
