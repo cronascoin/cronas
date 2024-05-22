@@ -496,13 +496,15 @@ class Peer:
         await writer.drain()
         logging.info(f"Request for peer list sent to {peer_info}.")
 
-    async def respond_to_heartbeat(self, writer, message):
+    async def respond_to_heartbeat(self, writer):
         peer_info = writer.get_extra_info('peername')
         peer_info_str = f"{peer_info[0]}:{peer_info[1]}"
         
         if peer_info_str in self.active_peers:
             self.active_peers[peer_info_str]['lastseen'] = int(time.time())
-            logging.info(f"Updated last seen for {peer_info_str}")
+            self.peers_changed = True
+            if self.debug:
+                logging.info(f"Updated last seen for {peer_info_str}")
 
         ack_message = {
             "type": "heartbeat_ack",
@@ -511,7 +513,8 @@ class Peer:
         }
         writer.write(json.dumps(ack_message).encode() + b'\n')
         await writer.drain()
-        logging.info(f"Sent heartbeat acknowledgment to {peer_info_str}.")
+        if self.debug:
+            logging.info(f"Sent heartbeat acknowledgment to {peer_info_str}.")
 
     async def rewrite_peers_file(self):
         if not self.peers_changed:
@@ -554,7 +557,7 @@ class Peer:
             self.file_write_scheduled = True
             asyncio.create_task(self._rewrite_after_delay())
 
-    async def send_heartbeat(self, writer, peer_info=None):
+    async def send_heartbeat(self, writer):
         await asyncio.sleep(60)
         try:
             while not writer.is_closing():
