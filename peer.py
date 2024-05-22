@@ -246,7 +246,8 @@ class Peer:
         }
         writer.write(json.dumps(ack_message).encode() + b'\n')
         await writer.drain()
-        logging.info(f"Handshake acknowledged to {peer_info}")
+        if self.debug:
+            logging.info(f"Handshake acknowledged to {peer_info}")
 
         # Update the active peer's details
         self.active_peers[peer_info] = {
@@ -259,7 +260,6 @@ class Peer:
         }
 
         asyncio.create_task(self.send_heartbeat(writer))
-
 
     async def handle_peer_connection(self, reader, writer):
         peer_address = writer.get_extra_info('peername')
@@ -289,6 +289,8 @@ class Peer:
 
         except asyncio.CancelledError:
             logging.info(f"Connection task with {peer_address} cancelled")
+        except ConnectionResetError:
+            logging.warning(f"Connection reset by peer {peer_address}.")
         except (asyncio.IncompleteReadError, json.JSONDecodeError):
             logging.warning(f"Connection with {peer_address} closed abruptly or received malformed data.")
         except Exception as e:
@@ -315,7 +317,8 @@ class Peer:
         ]
 
         for invalid_peer in invalid_peers:
-            logging.warning(f"Invalid peer received: {invalid_peer}")
+            if self.debug:
+                logging.warning(f"Invalid peer received: {invalid_peer}")
 
         self.peers.update(valid_new_peers)
         if valid_new_peers:
@@ -597,23 +600,23 @@ class Peer:
         await writer.drain()
 
     async def send_peer_list(self, writer):
-        logging.info("Attempting to send peer list...")
-        connecting_ports = [peer.split(':')[0] + ':' + peer.split(':')[1] for peer in self.active_peers.keys()]
-        
-        if connecting_ports:
-            peer_list_message = {
-                "type": "peer_list",
-                "payload": connecting_ports,
-                "server_id": self.server_id,
-                "version": self.version
-            }
+            logging.info("Attempting to send peer list...")
 
-            writer.write(json.dumps(peer_list_message).encode() + b'\n')
-            await writer.drain()
-            logging.info("Sent active peer list.")
-        else:
-            logging.warning("No active peers to send.")
+            connecting_ports = [peer for peer in self.active_peers.keys() if self.is_valid_peer(peer)]
 
+            if connecting_ports:
+                peer_list_message = {
+                    "type": "peer_list",
+                    "payload": connecting_ports,
+                    "server_id": self.server_id,
+                    "version": self.version
+                }
+
+                writer.write(json.dumps(peer_list_message).encode() + b'\n')
+                await writer.drain()
+                logging.info("Sent active peer list.")
+            else:
+                logging.warning("No valid active peers to send.")
 
     async def start(self):
         """Start the peer server and main loop."""
