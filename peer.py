@@ -225,7 +225,7 @@ class Peer:
 
     async def handle_hello_message(self, message, writer):
         addr = writer.get_extra_info('peername')
-        host, port = addr[0], addr[1]
+        #host, port = addr[0], addr[1]
 
         # Extract server_id and version from the hello message
         remote_server_id = message.get('server_id', 'unknown')
@@ -601,23 +601,23 @@ class Peer:
         await writer.drain()
 
     async def send_peer_list(self, writer):
-            logging.info("Attempting to send peer list...")
+        logging.info("Attempting to send peer list...")
 
-            connecting_ports = [peer for peer in self.active_peers.keys() if self.is_valid_peer(peer)]
+        if connecting_ports := [
+            peer for peer in self.active_peers.keys() if self.is_valid_peer(peer)
+        ]:
+            peer_list_message = {
+                "type": "peer_list",
+                "payload": connecting_ports,
+                "server_id": self.server_id,
+                "version": self.version
+            }
 
-            if connecting_ports:
-                peer_list_message = {
-                    "type": "peer_list",
-                    "payload": connecting_ports,
-                    "server_id": self.server_id,
-                    "version": self.version
-                }
-
-                writer.write(json.dumps(peer_list_message).encode() + b'\n')
-                await writer.drain()
-                logging.info("Sent active peer list.")
-            else:
-                logging.warning("No valid active peers to send.")
+            writer.write(json.dumps(peer_list_message).encode() + b'\n')
+            await writer.drain()
+            logging.info("Sent active peer list.")
+        else:
+            logging.warning("No valid active peers to send.")
 
     async def start(self):
         """Start the peer server and main loop."""
