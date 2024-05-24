@@ -23,7 +23,7 @@ sudo apt install python3-pip
 apt update && apt upgrade -y
 ```
 ```
-pip install aiohttp aiofiles netifaces
+pip install aiohttp aiofiles upnpclient
 ```
 ```
 git clone https://github.com/cronascoin/cronas.git
