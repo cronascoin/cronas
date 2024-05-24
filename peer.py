@@ -22,6 +22,7 @@ class Peer:
         self.server_id = server_id
         self.host = host
         self.p2p_port = p2p_port
+        self.external_p2p_port = None  # To store the UPnP-mapped port
         self.peers = {}
         self.active_peers = {}
         self.external_ip = self.detect_ip_address()
@@ -49,10 +50,10 @@ class Peer:
         self.upnp_device = None  # Initialize UPnP device to None
         self.upnp_service = None  # Initialize UPnP service to None
 
-    async def initialize_upnp(self):
-        await self.setup_upnp()
-        if self.upnp_device and self.upnp_service:
-            await self.add_port_mapping(self.p2p_port, self.host, self.p2p_port)
+    async def initialize_upnp(self, upnp_service):
+        self.upnp_service = upnp_service
+        if self.upnp_service:
+            self.external_p2p_port = await self.add_port_mapping(self.p2p_port, self.host, self.p2p_port)
         
     def is_private_ip(self, ip):
         return ipaddress.ip_address(ip).is_private
@@ -73,8 +74,8 @@ class Peer:
             await self.p2p_server.wait_closed()
             logging.info("P2P server closed.")
             
-            if self.upnp_device and self.upnp_service:
-                await self.remove_port_mapping(self.p2p_port)
+            if self.upnp_service:
+                await self.remove_port_mapping(self.external_p2p_port)
 
     async def connect_and_maintain(self):
         """Main loop for connecting and maintaining peer connections."""
@@ -220,7 +221,7 @@ class Peer:
         self.mark_peer_changed()
         await self.schedule_rewrite()
         asyncio.create_task(self.send_heartbeat(writer))
-
+        
     async def handle_disconnection(self, peer_info):
         if self.shutdown_flag:
             return
@@ -445,7 +446,7 @@ class Peer:
     async def process_message(self, message, writer):
         addr = writer.get_extra_info('peername')
         peer_info = f"{addr[0]}:{addr[1]}"
-        if self.debug:
+        if self.debug: 
             logging.info(f"Received message from {peer_info}: {message}")
             
         message_type = message.get("type")
@@ -543,11 +544,7 @@ class Peer:
 
         async with self.file_lock:
             try:
-                valid_peers = {
-                    peer_info: last_seen
-                    for peer_info, last_seen in self.peers.items()
-                    if self.is_valid_peer(peer_info) and last_seen != 0
-                }
+                valid_peers = dict(self.peers.items())
                 async with aiofiles.open("peers.dat", "w") as f:
                     for peer_info, last_seen in valid_peers.items():
                         await f.write(f"{peer_info}:{last_seen}\n")
@@ -605,7 +602,7 @@ class Peer:
         hello_message = {
             'type': 'hello',
             'host': self.out_ip,  # Use out_ip here
-            'port': self.p2p_port,  # Use p2p_port
+            'port': self.external_p2p_port or self.p2p_port,  # Use external UPnP port if available
             'server_id': self.server_id,
             'version': self.version
         }
@@ -755,8 +752,10 @@ class Peer:
                 NewLeaseDuration=0
             )
             logging.info(f"Port {external_port} mapped to {internal_ip}:{internal_port}")
+            return external_port
         except Exception as e:
             logging.error(f"Failed to add UPnP port mapping: {e}")
+            return None
 
     async def remove_port_mapping(self, external_port, protocol='TCP'):
         try:
