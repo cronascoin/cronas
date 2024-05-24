@@ -68,9 +68,10 @@ def write_config(config, config_path='cronas.conf'):
                         configfile.write(f"{key}={item}\n")
                 else:
                     configfile.write(f"{key}={value}\n")
-        logging.info("Config file updated.")
+        logging.info("Config file updated successfully.")
     except Exception as e:
-        logging.error(f"Failed to write to the config file: {e}")
+        logging.error(f"Failed to write to the config file '{config_path}': {e}")
+        raise e
 
 def get_out_ip():
     try:
@@ -105,7 +106,7 @@ def load_config(config_path='cronas.conf'):
         'rpc_port': '4334',
         'p2p_port': '4333',
         'maxpeers': 10,
-        'addnode': ['137.184.80.215:4333'],  # Example seed node
+        'addnode': ['137.184.80.215:4333'],
         'rpc_password': generate_password(),
         'debug': 'false'
     }

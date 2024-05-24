@@ -24,6 +24,10 @@
         "rpcuser",
         "socketname",
         "sockname",
-        "sourcery"
+        "sourcery",
+        "upnp",
+        "upnpclient",
+        "WANIP",
+        "WANPPP"
     ]
 }

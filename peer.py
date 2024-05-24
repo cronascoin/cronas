@@ -1,6 +1,3 @@
-# Copyright 2024 cronas.org
-# peers.py
-
 import asyncio
 import datetime
 import errno
@@ -13,6 +10,10 @@ import ipaddress
 import aiofiles
 import requests
 import random
+import aiohttp
+from async_upnp_client.aiohttp import AiohttpSessionRequester
+from async_upnp_client.client import UpnpDevice
+from async_upnp_client.exceptions import UpnpError
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
@@ -44,7 +45,15 @@ class Peer:
         self.p2p_server = None  # Initialize p2p_server
         self.last_peer_list_request = {}  # Track last peer list request times
         self.start_time = datetime.datetime.now()  # Add start time
+        
+        self.upnp_device = None  # Initialize UPnP device to None
+        self.upnp_service = None  # Initialize UPnP service to None
 
+    async def initialize_upnp(self):
+        await self.setup_upnp()
+        if self.upnp_device and self.upnp_service:
+            await self.add_port_mapping(self.p2p_port, self.host, self.p2p_port)
+        
     def is_private_ip(self, ip):
         return ipaddress.ip_address(ip).is_private
 
@@ -63,6 +72,9 @@ class Peer:
             self.p2p_server.close()
             await self.p2p_server.wait_closed()
             logging.info("P2P server closed.")
+            
+            if self.upnp_device and self.upnp_service:
+                await self.remove_port_mapping(self.p2p_port)
 
     async def connect_and_maintain(self):
         """Main loop for connecting and maintaining peer connections."""
@@ -151,7 +163,6 @@ class Peer:
             self.connection_attempts.pop(peer_info, None)
             return
 
-
     def detect_ip_address(self):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -176,7 +187,6 @@ class Peer:
         current_time = datetime.datetime.now()
         uptime = current_time - self.start_time
         return uptime.total_seconds()
-
 
     async def handle_ack_message(self, message, writer):
         addr = writer.get_extra_info('peername')
@@ -210,7 +220,7 @@ class Peer:
         self.mark_peer_changed()
         await self.schedule_rewrite()
         asyncio.create_task(self.send_heartbeat(writer))
-        
+
     async def handle_disconnection(self, peer_info):
         if self.shutdown_flag:
             return
@@ -225,7 +235,6 @@ class Peer:
 
     async def handle_hello_message(self, message, writer):
         addr = writer.get_extra_info('peername')
-        #host, port = addr[0], addr[1]
 
         # Extract server_id and version from the hello message
         remote_server_id = message.get('server_id', 'unknown')
@@ -436,7 +445,7 @@ class Peer:
     async def process_message(self, message, writer):
         addr = writer.get_extra_info('peername')
         peer_info = f"{addr[0]}:{addr[1]}"
-        if self.debug: 
+        if self.debug:
             logging.info(f"Received message from {peer_info}: {message}")
             
         message_type = message.get("type")
@@ -452,32 +461,41 @@ class Peer:
             await self.handle_peer_list_message(message)
 
     async def reconnect_to_peer(self, host, port):
-        peer_identifier = f"{host}:{port}"
-        logging.info(f"Attempting to reconnect to {peer_identifier}")
+        peer_info = f"{host}:{port}"
+        await self._attempt_reconnect(peer_info)
+
+    async def schedule_reconnect(self, peer_info):
+        await self._attempt_reconnect(peer_info)
+
+    async def _attempt_reconnect(self, peer_info):
+        logging.info(f"Attempting to reconnect to {peer_info}")
 
         retry_intervals = [60, 3600, 86400, 2592000]
+        attempt = 0
 
-        for attempt, base_delay in enumerate(retry_intervals):
+        while attempt < len(retry_intervals):
             if self.shutdown_flag:
-                logging.info(f"Shutdown in progress, cancelling reconnection attempts for {peer_identifier}.")
+                logging.info(f"Shutdown in progress, cancelling reconnection attempts for {peer_info}.")
                 return
 
-            if peer_identifier not in self.active_peers and peer_identifier not in self.peers_connecting:
+            if peer_info not in self.active_peers and peer_info not in self.peers_connecting:
                 try:
                     jitter = random.uniform(0.8, 1.2)
-                    backoff_time = base_delay * jitter
-                    logging.info(f"Scheduling reconnection attempt for {peer_identifier} in {backoff_time:.2f} seconds.")
+                    backoff_time = retry_intervals[attempt] * jitter
+                    logging.info(f"Scheduling reconnection attempt for {peer_info} in {backoff_time:.2f} seconds.")
                     await asyncio.sleep(backoff_time)
 
-                    await self.connect_to_peer(host, port)
+                    host, port = peer_info.split(':')
+                    await self.connect_to_peer(host, int(port))
 
-                    if peer_identifier in self.active_peers:
-                        logging.info(f"Reconnected to {peer_identifier} successfully.")
+                    if peer_info in self.active_peers:
+                        logging.info(f"Reconnected to {peer_info} successfully.")
                         break
                 except Exception as e:
-                    logging.error(f"Reconnection attempt {attempt} to {peer_identifier} failed: {e}")
+                    logging.error(f"Reconnection attempt {attempt} to {peer_info} failed: {e}")
+                    attempt += 1
             else:
-                logging.info(f"{peer_identifier} is already active or attempting to reconnect.")
+                logging.info(f"{peer_info} is already active or attempting to reconnect.")
                 break
 
     async def request_peer_list(self, writer, peer_info):
@@ -698,31 +716,55 @@ class Peer:
 
         await asyncio.gather(*[self.close_connection(*peer.split(':')) for peer in self.connections.keys()])
 
-    async def schedule_reconnect(self, peer_info):
-        """Schedule reconnection attempts for a peer with exponential backoff."""
-        retry_intervals = [60, 3600, 86400, 2592000]
-        base_delay = retry_intervals[0]
-        attempt = 0
-
-        while attempt < len(retry_intervals):
-            if self.shutdown_flag:
-                logging.info(f"Shutdown in progress, cancelling reconnection attempts for {peer_info}.")
-                return
-
-            jitter = random.uniform(0.8, 1.2)
-            backoff_time = base_delay * jitter
-            logging.info(f"Scheduling reconnection attempt for {peer_info} in {backoff_time:.2f} seconds.")
-            await asyncio.sleep(backoff_time)
-
+    async def setup_upnp(self):
+        """Discover UPnP devices and get the Internet Gateway Device (IGD) with retries."""
+        retries = 3
+        for attempt in range(retries):
             try:
-                host, port = peer_info.split(':')
-                await self.connect_to_peer(host, int(port))
-                logging.info(f"Reconnected to {peer_info} successfully.")
-                break
+                if self.shutdown_flag:
+                    logging.info("Shutdown in progress, cancelling UPnP setup.")
+                    return None
+
+                async with aiohttp.ClientSession() as session:
+                    requester = AiohttpSessionRequester(session)
+                    devices = await requester.async_discover()
+                    if not devices:
+                        raise UpnpError("No UPnP devices found")
+
+                    upnp_device = await UpnpDevice.async_create_device(devices[0].location, requester)
+                    upnp_service = upnp_device.service('urn:schemas-upnp-org:service:WANIPConnection:1')
+
+                    self.upnp_device = upnp_device
+                    self.upnp_service = upnp_service
+                    return upnp_device
             except Exception as e:
-                logging.error(f"Reconnection attempt to {peer_info} failed: {e}")
-                attempt += 1
-                if attempt < len(retry_intervals):
-                    base_delay = retry_intervals[attempt]
-                else:
-                    logging.info(f"Max reconnection attempts reached for {peer_info}. Giving up.")
+                logging.error(f"Failed to setup UPnP (attempt {attempt + 1}/{retries}): {e}")
+                await asyncio.sleep(5)
+        return None
+
+    async def add_port_mapping(self, external_port, internal_ip, internal_port, protocol='TCP', description='P2P application'):
+        try:
+            await self.upnp_service.async_add_port_mapping(
+                NewRemoteHost='',
+                NewExternalPort=external_port,
+                NewProtocol=protocol,
+                NewInternalPort=internal_port,
+                NewInternalClient=internal_ip,
+                NewEnabled='1',
+                NewPortMappingDescription=description,
+                NewLeaseDuration=0
+            )
+            logging.info(f"Port {external_port} mapped to {internal_ip}:{internal_port}")
+        except Exception as e:
+            logging.error(f"Failed to add UPnP port mapping: {e}")
+
+    async def remove_port_mapping(self, external_port, protocol='TCP'):
+        try:
+            await self.upnp_service.async_delete_port_mapping(
+                NewRemoteHost='',
+                NewExternalPort=external_port,
+                NewProtocol=protocol
+            )
+            logging.info(f"Port {external_port} unmapped")
+        except Exception as e:
+            logging.error(f"Failed to remove UPnP port mapping: {e}")
