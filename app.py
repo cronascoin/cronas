@@ -1,4 +1,3 @@
-# Copyright 2024 cronas.org
 # app.py
 
 import asyncio
@@ -77,9 +76,25 @@ def get_out_ip():
     try:
         response = requests.get('https://api.ipify.org?format=json')
         response.raise_for_status()
-        return response.json()['ip']
+        ip = response.json()['ip']
+        if ip == '127.0.0.1':
+            raise ValueError("Detected out_ip is 127.0.0.1, which is invalid.")
+        return ip
+    except (requests.RequestException, ValueError) as e:
+        logging.error(f"Failed to detect external IP address: {e}")
+        return get_fallback_ip()
+
+def get_fallback_ip():
+    """Fallback method to detect external IP using a different service."""
+    try:
+        response = requests.get('https://ifconfig.me')
+        response.raise_for_status()
+        ip = response.text.strip()
+        if ip == '127.0.0.1':
+            raise ValueError("Fallback detected out_ip is 127.0.0.1, which is invalid.")
+        return ip
     except requests.RequestException as e:
-        logging.error(f"Failed to get public IP address: {e}")
+        logging.error(f"Fallback method failed to detect external IP address: {e}")
         return None
 
 def load_config(config_path='cronas.conf'):
@@ -156,12 +171,7 @@ async def main():
     max_peers = int(config.get('maxpeers', 10))
 
     peer = Peer('0.0.0.0', p2p_port, server_id, version, max_peers, config=config)
-
-    if not os.path.exists("peers.dat"):
-        addnodes = config.get('addnode', [])
-        for peer_info in addnodes:
-            if peer.is_valid_peer(peer_info):
-                peer.peers[peer_info] = int(time.time())
+    await peer.load_peers()  # Load peers only once
 
     rpc_server = RPCServer(peer, '127.0.0.1', rpc_port, rpc_password)
 

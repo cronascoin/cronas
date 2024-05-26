@@ -1,6 +1,3 @@
-# Copyright 2024 cronas.org
-# rpc.py
-
 import asyncio
 import ipaddress
 import time
@@ -60,7 +57,8 @@ class RPCServer:
                     "addr": peer_details.get('addr', 'unknown'),
                     "addrlocal": peer_details.get('addrlocal', 'unknown'),
                     "addrbind": peer_details.get('addrbind', 'unknown'),
-                    "lastseen": peer_details.get('lastseen', 'unknown')
+                    "lastseen": peer_details.get('lastseen', 'unknown'),
+                    "ping": f"{peer_details.get('ping', 'unknown'):.3f}" if isinstance(peer_details.get('ping'), (int, float)) else 'unknown'  # Limit ping to 3 decimal places
                 }
                 for peer_details in self.peer.active_peers.values()
             ]
@@ -117,6 +115,5 @@ class RPCServer:
         except Exception as e:
             logging.error(f"Error adding node: {e}")
             return web.Response(status=500, text=json.dumps({"error": "Internal server error"}))
-
 
 # Additional methods as needed
