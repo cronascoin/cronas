@@ -39,7 +39,7 @@ Currently the project is in development.
 
 For a list of peers
 ```
-python3 cli.py peers
+python3 cli.py getpeerinfo
 ```
 To add nodes
 ```
