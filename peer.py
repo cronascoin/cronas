@@ -11,20 +11,23 @@ import aiofiles
 import requests
 import random
 import aiohttp
-import xml.etree.ElementTree as ET
+import stun
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
+def get_stun_info():
+    nat_type, external_ip, external_port = stun.get_ip_info(stun_host='stun.l.google.com', stun_port=19302)
+    logging.info(f"NAT Type: {nat_type}, External IP: {external_ip}, External Port: {external_port}")
+    return external_ip, external_port
 
 class Peer:
     def __init__(self, host, p2p_port, server_id, version, max_peers=10, config=None):
         self.server_id = server_id
         self.host = host
         self.p2p_port = p2p_port
-        self.external_p2p_port = None  # To store the UPnP-mapped port
         self.peers = {}
         self.active_peers = {}
-        self.external_ip = self.detect_ip_address()
-        self.out_ip = self.detect_out_ip()
+        self.external_ip, self.external_p2p_port = get_stun_info()
         self.hello_seq = 0
         self.version = version
         self.file_lock = asyncio.Lock()
@@ -41,167 +44,9 @@ class Peer:
         self.peers_connecting = set()
         self.config = config
         self.debug = config.get('debug', 'false').lower() == 'true'
-        self.p2p_server = None  # Initialize p2p_server
-        self.last_peer_list_request = {}  # Track last peer list request times
-        self.start_time = datetime.datetime.now()  # Add start time
-        self.upnp_device = None  # Initialize UPnP device to None
-        self.upnp_service = None  # Initialize UPnP service to None
-
-    async def discover_upnp_devices(self):
-        """Discover UPnP devices on the network using sockets."""
-        search_target = "urn:schemas-upnp-org:device:InternetGatewayDevice:1"
-        message = f"M-SEARCH * HTTP/1.1\r\n" \
-                f"HOST: 239.255.255.250:1900\r\n" \
-                f"MAN: \"ssdp:discover\"\r\n" \
-                f"MX: 3\r\n" \
-                f"ST: {search_target}\r\n" \
-                f"\r\n"
-
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
-        sock.settimeout(5)
-
-        try:
-            # Send the multicast message
-            sock.sendto(message.encode('utf-8'), ('239.255.255.250', 1900))
-
-            # Receive responses
-            devices = []
-            while True:
-                try:
-                    data, _ = sock.recvfrom(1024)
-                    devices.append(data.decode('utf-8'))
-                except socket.timeout:
-                    break
-        finally:
-            sock.close()
-
-        return self.parse_upnp_response("\r\n".join(devices))
-
-    def parse_upnp_response(self, response_text):
-        """Parse the UPnP discovery response."""
-        return [
-            line.split(':', 1)[1].strip()
-            for line in response_text.split('\r\n')
-            if line.lower().startswith('location:')
-        ]
-
-    async def get_upnp_device_description(self, location):
-        """Retrieve the UPnP device description."""
-        async with aiohttp.ClientSession() as session:
-            async with session.get(location) as response:
-                xml = await response.text()
-                return ET.fromstring(xml)
-
-    def find_service(self, device, service_type):
-        """Find a specific service within the UPnP device description."""
-        return next(
-            (
-                service
-                for service in device.findall(
-                    './/{urn:schemas-upnp-org:device-1-0}service'
-                )
-                if service.find(
-                    '{urn:schemas-upnp-org:device-1-0}serviceType'
-                ).text
-                == service_type
-            ),
-            None,
-        )
-
-    async def add_port_mapping(self, external_port, internal_ip, internal_port, protocol='TCP', description='P2P application'):
-        try:
-            control_url = self.upnp_service.find('{urn:schemas-upnp-org:device-1-0}controlURL').text
-            service_type = self.upnp_service.find('{urn:schemas-upnp-org:device-1-0}serviceType').text
-
-            action = 'AddPortMapping'
-            body = f"""
-            <?xml version="1.0"?>
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-            <s:Body>
-                <u:{action} xmlns:u="{service_type}">
-                <NewRemoteHost></NewRemoteHost>
-                <NewExternalPort>{external_port}</NewExternalPort>
-                <NewProtocol>{protocol}</NewProtocol>
-                <NewInternalPort>{internal_port}</NewInternalPort>
-                <NewInternalClient>{internal_ip}</NewInternalClient>
-                <NewEnabled>1</NewEnabled>
-                <NewPortMappingDescription>{description}</NewPortMappingDescription>
-                <NewLeaseDuration>0</NewLeaseDuration>
-                </u:{action}>
-            </s:Body>
-            </s:Envelope>
-            """
-
-            headers = {
-                'Content-Type': 'text/xml',
-                'SOAPACTION': f'"{service_type}#{action}"'
-            }
-
-            logging.debug(f"Sending SOAP request to {control_url} with headers: {headers} and body: {body}")
-
-            async with aiohttp.ClientSession() as session:
-                async with session.post(control_url, data=body, headers=headers) as response:
-                    response_text = await response.text()
-                    logging.debug(f"Response from UPnP device: {response.status} - {response_text}")
-
-                    if response.status == 200:
-                        logging.info(f"Port {external_port} mapped to {internal_ip}:{internal_port}")
-                        return external_port
-                    else:
-                        logging.error(f"Failed to add UPnP port mapping: {response.status} - {response_text}")
-                        return None
-        except Exception as e:
-            logging.error(f"Failed to add UPnP port mapping: {e}")
-            return None
-
-
-    async def remove_port_mapping(self, external_port, protocol='TCP'):
-        try:
-            control_url = self.upnp_service.find('{urn:schemas-upnp-org:device-1-0}controlURL').text
-            service_type = self.upnp_service.find('{urn:schemas-upnp-org:device-1-0}serviceType').text
-
-            action = 'DeletePortMapping'
-            body = f"""
-            <?xml version="1.0"?>
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-              <s:Body>
-                <u:{action} xmlns:u="{service_type}">
-                  <NewRemoteHost></NewRemoteHost>
-                  <NewExternalPort>{external_port}</NewExternalPort>
-                  <NewProtocol>{protocol}</NewProtocol>
-                </u:{action}>
-              </s:Body>
-            </s:Envelope>
-            """
-
-            headers = {
-                'Content-Type': 'text/xml',
-                'SOAPACTION': f'"{service_type}#{action}"'
-            }
-
-            async with aiohttp.ClientSession() as session:
-                async with session.post(control_url, data=body, headers=headers) as response:
-                    if response.status == 200:
-                        logging.info(f"Port {external_port} unmapped")
-                    else:
-                        logging.error(f"Failed to remove UPnP port mapping: {response.status}")
-        except Exception as e:
-            logging.error(f"Failed to remove UPnP port mapping: {e}")
-
-    async def initialize_upnp(self):
-        logging.info("Initializing UPnP service...")
-        devices = await self.discover_upnp_devices()
-        if devices:
-            self.upnp_device = await self.get_upnp_device_description(devices[0])
-            self.upnp_service = self.find_service(self.upnp_device, 'urn:schemas-upnp-org:service:WANIPConnection:1')
-            if self.upnp_service:
-                self.external_p2p_port = await self.add_port_mapping(self.p2p_port, self.host, self.p2p_port)
-                logging.info(f"UPnP port mapping established: {self.external_p2p_port}")
-            else:
-                logging.info("UPnP service not available.")
-        else:
-            logging.info("No UPnP devices found.")
+        self.p2p_server = None
+        self.last_peer_list_request = {}
+        self.start_time = datetime.datetime.now()
 
     def is_private_ip(self, ip):
         return ipaddress.ip_address(ip).is_private
@@ -219,12 +64,8 @@ class Peer:
             self.p2p_server.close()
             await self.p2p_server.wait_closed()
             logging.info("P2P server closed.")
-            
-            if self.upnp_service:
-                await self.remove_port_mapping(self.external_p2p_port)
 
     async def connect_and_maintain(self):
-        """Main loop for connecting and maintaining peer connections."""
         while not self.shutdown_flag:
             await self.connect_to_known_peers()
             await asyncio.sleep(60)
@@ -291,7 +132,7 @@ class Peer:
                 self.connections[peer_info] = (reader, writer)
                 self.active_peers[peer_info] = {
                     'addr': peer_info,
-                    'addrlocal': f"{self.out_ip}:{local_port}",
+                    'addrlocal': f"{self.external_ip}:{local_port}",
                     'addrbind': f"{self.external_ip}:{local_port}",
                     'server_id': "unknown",  # Initialize with unknown, will be updated upon receiving ack
                     'version': "unknown",    # Initialize with unknown, will be updated upon receiving ack
@@ -330,33 +171,7 @@ class Peer:
             logging.info(f"Failed to detect external IP address: {e}")
             return '127.0.0.1'
 
-    def detect_out_ip(self):
-        try:
-            response = requests.get('https://api.ipify.org?format=json')
-            response.raise_for_status()
-            ip = response.json()['ip']
-            if ip == '127.0.0.1':
-                raise ValueError("Detected out_ip is 127.0.0.1, which is invalid.")
-            return ip
-        except (requests.RequestException, ValueError) as e:
-            logging.error(f"Failed to detect external IP address: {e}")
-            return self.get_fallback_ip()
-
-    def get_fallback_ip(self):
-        """Fallback method to detect external IP using a different service."""
-        try:
-            response = requests.get('https://ifconfig.me')
-            response.raise_for_status()
-            ip = response.text.strip()
-            if ip == '127.0.0.1':
-                raise ValueError("Fallback detected out_ip is 127.0.0.1, which is invalid.")
-            return ip
-        except requests.RequestException as e:
-            logging.error(f"Fallback method failed to detect external IP address: {e}")
-            return '127.0.0.1'
-
     def get_uptime(self):
-        """Calculate and return the uptime in seconds."""
         current_time = datetime.datetime.now()
         uptime = current_time - self.start_time
         return uptime.total_seconds()
@@ -368,11 +183,10 @@ class Peer:
         remote_server_id = message.get("server_id", "unknown")
         local_addr, local_port = writer.get_extra_info('sockname')
 
-        addrlocal = f"{self.out_ip}:{local_port}"
+        addrlocal = f"{self.external_ip}:{local_port}"
         addrbind = f"{self.external_ip}:{local_port}"
 
         if peer_info in self.active_peers:
-            # Calculate ping time
             receive_time = time.time()
             send_time = self.active_peers[peer_info].get('send_time', receive_time)
             ping = receive_time - send_time
@@ -383,7 +197,7 @@ class Peer:
                 "server_id": remote_server_id,
                 "version": remote_version,
                 "lastseen": int(time.time()),
-                "ping": round(ping, 3)  # Limit ping to 3 decimal places
+                "ping": round(ping, 3)
             })
         else:
             self.active_peers[peer_info] = {
@@ -418,11 +232,9 @@ class Peer:
     async def handle_hello_message(self, message, writer):
         addr = writer.get_extra_info('peername')
 
-        # Extract server_id and version from the hello message
         remote_server_id = message.get('server_id', 'unknown')
         remote_version = message.get('version', 'unknown')
 
-        # Construct peer_info using potential listening_port
         if 'listening_port' in message and isinstance(message['listening_port'], int):
             peer_port = message['listening_port']
             peer_info = f"{addr[0]}:{peer_port}"
@@ -440,11 +252,10 @@ class Peer:
         if self.debug:
             logging.info(f"Handshake acknowledged to {peer_info}")
 
-        # Update the active peer's details
         self.active_peers[peer_info] = {
             "addr": peer_info,
-            "addrlocal": f"{self.out_ip}:{addr[1]}",  # Use the actual connection port
-            "addrbind": f"{self.external_ip}:{addr[1]}",  # Use the actual connection port
+            "addrlocal": f"{self.external_ip}:{addr[1]}",
+            "addrbind": f"{self.external_ip}:{addr[1]}",
             "server_id": remote_server_id,
             "version": remote_version,
             "lastseen": int(time.time()),
@@ -542,7 +353,7 @@ class Peer:
             ip, port = peer_info.split(':')
             ipaddress.ip_address(ip)
 
-            if ip in [self.host, self.external_ip, self.out_ip, "127.0.0.1", "localhost"]:
+            if ip in [self.host, self.external_ip, "127.0.0.1", "localhost"]:
                 logging.info(f"Skipping self-peer with IP: {ip}")
                 return False
 
@@ -785,8 +596,8 @@ class Peer:
     async def send_hello_message(self, writer):
         hello_message = {
             'type': 'hello',
-            'host': self.out_ip,  # Use out_ip here
-            'port': self.external_p2p_port or self.p2p_port,  # Use external UPnP port if available
+            'host': self.external_ip,
+            'port': self.external_p2p_port or self.p2p_port,
             'server_id': self.server_id,
             'version': self.version
         }
@@ -819,7 +630,6 @@ class Peer:
             logging.warning("No valid active peers to send.")
 
     async def start(self):
-        """Start the peer server and main loop."""
         try:
             if not os.path.exists("peers.dat"):
                 self.addnode = self.config.get('addnode', [])
@@ -828,10 +638,6 @@ class Peer:
                         self.peers[peer_info] = int(time.time())
 
             await self.load_peers()
-
-            # Setup UPnP before starting the server
-            await self.initialize_upnp()
-
             await self.start_p2p_server()
             asyncio.create_task(self.connect_and_maintain())
         finally:
@@ -845,7 +651,7 @@ class Peer:
                 self.handle_peer_connection, self.host, self.p2p_port,
                 reuse_address=True
             )
-            self.p2p_server = server  # Assign to self.p2p_server
+            self.p2p_server = server
             logging.info(f"P2P server version {self.version} with ID {self.server_id} listening on {self.host}:{self.p2p_port}")
             await self.connect_to_known_peers()
             asyncio.create_task(self.schedule_periodic_peer_save())
@@ -893,7 +699,6 @@ class Peer:
         self.file_write_scheduled = False
 
     async def cleanup_and_rewrite_peers(self):
-        """Cleanup peers with last_seen of 0 and rewrite the peers file."""
         self.peers = {peer_info: last_seen for peer_info, last_seen in self.peers.items() if last_seen != 0}
         self.peers_changed = True
         await self.rewrite_peers_file()
@@ -901,7 +706,6 @@ class Peer:
         await asyncio.gather(*[self.close_connection(*peer.split(':')) for peer in self.connections.keys()])
 
     def update_active_peers(self):
-        # Sort peers by ping and keep the top 10 fastest
         self.active_peers = dict(sorted(
             self.active_peers.items(),
             key=lambda x: float(x[1]['ping']) if x[1]['ping'] is not None else float('inf')
