@@ -213,8 +213,6 @@ class Peer:
                 writer.close()
                 await writer.wait_closed()
             logging.info(f"Successfully closed connection to {host}:{port}")
-        else:
-            logging.info(f"No active connection found for {host}:{port} to close.")
 
     async def close_p2p_server(self):
         if self.p2p_server:
