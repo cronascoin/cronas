@@ -11,7 +11,6 @@ import aiofiles
 import requests
 import random
 import aiohttp
-import struct
 import xml.etree.ElementTree as ET
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
@@ -81,11 +80,11 @@ class Peer:
 
     def parse_upnp_response(self, response_text):
         """Parse the UPnP discovery response."""
-        locations = []
-        for line in response_text.split('\r\n'):
-            if line.lower().startswith('location:'):
-                locations.append(line.split(':', 1)[1].strip())
-        return locations
+        return [
+            line.split(':', 1)[1].strip()
+            for line in response_text.split('\r\n')
+            if line.lower().startswith('location:')
+        ]
 
     async def get_upnp_device_description(self, location):
         """Retrieve the UPnP device description."""
@@ -96,10 +95,19 @@ class Peer:
 
     def find_service(self, device, service_type):
         """Find a specific service within the UPnP device description."""
-        for service in device.findall('.//{urn:schemas-upnp-org:device-1-0}service'):
-            if service.find('{urn:schemas-upnp-org:device-1-0}serviceType').text == service_type:
-                return service
-        return None
+        return next(
+            (
+                service
+                for service in device.findall(
+                    './/{urn:schemas-upnp-org:device-1-0}service'
+                )
+                if service.find(
+                    '{urn:schemas-upnp-org:device-1-0}serviceType'
+                ).text
+                == service_type
+            ),
+            None,
+        )
 
     async def add_port_mapping(self, external_port, internal_ip, internal_port, protocol='TCP', description='P2P application'):
         try:
