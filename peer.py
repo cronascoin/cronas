@@ -123,6 +123,7 @@ class Peer:
 
     async def connect_to_peer(self, host, port, max_retries=5):
         peer_info = f"{host}:{port}"
+        backoff_base = 5  # Base time for exponential backoff
 
         if peer_info not in self.connection_attempts:
             self.connection_attempts[peer_info] = 0
@@ -172,11 +173,14 @@ class Peer:
             except Exception as e:
                 logging.error(f"Error connecting to {host}:{port}: {e}")
                 self.connection_attempts[peer_info] += 1
-                await asyncio.sleep(self.connection_attempts[peer_info] * 5)
+                backoff_time = backoff_base * (2 ** self.connection_attempts[peer_info]) + random.uniform(0, 1)
+                logging.info(f"Retrying connection to {peer_info} in {backoff_time:.2f} seconds.")
+                await asyncio.sleep(backoff_time)
 
         if peer_info in self.connection_attempts:
             logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
             self.connection_attempts.pop(peer_info, None)
+            await self.handle_disconnection(peer_info)
             return
 
     def detect_ip_address(self):
@@ -204,12 +208,13 @@ class Peer:
         addrlocal = f"{self.external_ip}:{local_port}"
         addrbind = f"{self.external_ip}:{local_port}"
 
-        if peer_info in self.active_peers:
+        if remote_server_id in self.active_peers:
             receive_time = time.time()
-            send_time = self.active_peers[peer_info].get('send_time', receive_time)
+            send_time = self.active_peers[remote_server_id].get('send_time', receive_time)
             ping = receive_time - send_time
 
-            self.active_peers[peer_info].update({
+            self.active_peers[remote_server_id].update({
+                "addr": peer_info,
                 "addrlocal": addrlocal,
                 "addrbind": addrbind,
                 "server_id": remote_server_id,
@@ -218,7 +223,7 @@ class Peer:
                 "ping": round(ping, 3)
             })
         else:
-            self.active_peers[peer_info] = {
+            self.active_peers[remote_server_id] = {
                 "addr": peer_info,
                 "addrlocal": addrlocal,
                 "addrbind": addrbind,
@@ -241,10 +246,19 @@ class Peer:
         if peer_info in self.peers:
             self.peers[peer_info] = int(time.time())
             await self.schedule_rewrite()
-        if peer_info in self.active_peers:
-            del self.active_peers[peer_info]
+
+        if server_id_to_remove := next(
+            (
+                server_id
+                for server_id, peer in self.active_peers.items()
+                if peer['addr'] == peer_info
+            ),
+            None,
+        ):
+            del self.active_peers[server_id_to_remove]
             logging.info(f"Removed {peer_info} from active peers due to disconnection or error.")
             await self.schedule_reconnect(peer_info)
+
         self.update_active_peers()
 
     async def handle_hello_message(self, message, writer):
@@ -276,7 +290,7 @@ class Peer:
         if self.debug:
             logging.info(f"Handshake acknowledged to {peer_info}")
 
-        self.active_peers[peer_info] = {
+        self.active_peers[remote_server_id] = {
             "addr": peer_info,
             "addrlocal": f"{self.external_ip}:{addr[1]}",
             "addrbind": f"{self.external_ip}:{addr[1]}",
@@ -288,7 +302,7 @@ class Peer:
 
         self.update_active_peers()
         asyncio.create_task(self.send_heartbeat(writer))
-        
+
     async def handle_peer_connection(self, reader, writer):
         peer_address = writer.get_extra_info('peername')
         peer_info = f"{peer_address[0]}:{peer_address[1]}"
@@ -541,9 +555,10 @@ class Peer:
     async def respond_to_heartbeat(self, writer, message):
         peer_info = writer.get_extra_info('peername')
         peer_info_str = f"{peer_info[0]}:{peer_info[1]}"
+        remote_server_id = message.get("server_id", "unknown")
 
-        if peer_info_str in self.active_peers:
-            self.active_peers[peer_info_str]['lastseen'] = int(time.time())
+        if remote_server_id in self.active_peers:
+            self.active_peers[remote_server_id]['lastseen'] = int(time.time())
             self.peers_changed = True
             if self.debug:
                 logging.info(f"Updated last seen for {peer_info_str}")
