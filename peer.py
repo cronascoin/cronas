@@ -173,12 +173,13 @@ class Peer:
             except Exception as e:
                 logging.error(f"Error connecting to {host}:{port}: {e}")
                 self.connection_attempts[peer_info] += 1
-                await asyncio.sleep(self.connection_attempts[peer_info] * 5)
+                await asyncio.sleep(min(self.connection_attempts[peer_info] * 5, 60))  # Increasing sleep time for each retry
 
         if peer_info in self.connection_attempts:
             logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
             self.connection_attempts.pop(peer_info, None)
-            return
+            await self.schedule_reconnect(peer_info)
+
 
     def detect_ip_address(self):
         try:
