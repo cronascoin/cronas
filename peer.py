@@ -170,7 +170,8 @@ class Peer:
                 return
 
             except Exception as e:
-                logging.error(f"Error connecting to {host}:{port}: {e}")
+                if self.debug:
+                    logging.error(f"Error connecting to {host}:{port}: {e}")
                 self.connection_attempts[peer_info] += 1
                 await asyncio.sleep(self.connection_attempts[peer_info] * 5)
 
