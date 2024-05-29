@@ -342,12 +342,12 @@ class Peer:
 
         valid_new_peers = {
             peer_info: self.peers.get(peer_info, 0) for peer_info in new_peers
-            if self.is_valid_peer(peer_info)
+            if self.validate_peer_info(peer_info)
         }
 
         invalid_peers = [
             peer_info for peer_info in new_peers
-            if not self.is_valid_peer(peer_info)
+            if not self.validate_peer_info(peer_info)
         ]
 
         for invalid_peer in invalid_peers:
@@ -652,12 +652,14 @@ class Peer:
     async def send_peer_list(self, writer):
         logging.info("Attempting to send peer list...")
 
-        if connecting_ports := [
-            peer for peer in self.active_peers.keys() if self.is_valid_peer(peer)
+        if valid_peers := [
+            peer
+            for peer in self.active_peers.keys()
+            if self.validate_peer_info(peer)
         ]:
             peer_list_message = {
                 "type": "peer_list",
-                "payload": connecting_ports,
+                "payload": valid_peers,
                 "server_id": self.server_id,
                 "version": self.version,
                 "timestamp": time.time() + self.ntp_offset
@@ -756,3 +758,14 @@ class Peer:
             unique_peers.items(),
             key=lambda x: float(x[1]['ping']) if x[1]['ping'] is not None else float('inf')
         )[:self.max_peers])
+
+    def validate_peer_info(self, peer_info):
+        try:
+            host, port = peer_info.split(':')
+            if not (host and port):
+                raise ValueError("Host or port missing")
+            port = int(port)
+            return True
+        except Exception as e:
+            logging.error(f"Invalid peer address '{peer_info}': {e}")
+            return False
