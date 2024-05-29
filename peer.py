@@ -264,22 +264,19 @@ class Peer:
         else:
             peer_info = f"{addr[0]}:{addr[1]}"
 
-        ack_message = {
-            "type": "ack",
+        pong_message = {
+            "type": "pong",
             "payload": "Handshake acknowledged",
             "version": self.version,
             "server_id": self.server_id,
             "timestamp": time.time() + self.ntp_offset
         }
-        writer.write(json.dumps(ack_message).encode() + b'\n')
+        writer.write(json.dumps(pong_message).encode() + b'\n')
         await writer.drain()
         if self.debug:
-            logging.info(f"Handshake acknowledged to {peer_info}")
+            logging.info(f"Pong message acknowledged to {peer_info}")
 
-        receive_time = time.time()
-        send_time = self.active_peers.get(peer_info, {}).get('send_time', receive_time)
-        ping = receive_time - send_time
-
+        # Store send_time for ping calculation
         self.active_peers[peer_info] = {
             "addr": peer_info,
             "addrlocal": f"{self.external_ip}:{addr[1]}",
@@ -287,7 +284,8 @@ class Peer:
             "server_id": remote_server_id,
             "version": remote_version,
             "lastseen": int(time.time()),
-            "ping": round(ping, 3) if 'send_time' in self.active_peers.get(peer_info, {}) else None
+            "send_time": time.time(),  # Record the send time of the pong message
+            "ping": None
         }
 
         self.update_active_peers()
@@ -297,8 +295,8 @@ class Peer:
         peer_address = writer.get_extra_info('peername')
         peer_info = f"{peer_address[0]}:{peer_address[1]}"
 
-        if peer_info in self.connections:
-            logging.info(f"Duplicate connection attempt to {peer_info}. Closing new connection.")
+        if peer_info in self.active_peers:
+            logging.info(f"Duplicate connection attempt from {peer_info}. Closing new connection.")
             writer.close()
             await writer.wait_closed()
             return
