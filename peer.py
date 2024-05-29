@@ -249,7 +249,7 @@ class Peer:
 
     async def handle_hello_message(self, message, writer):
         addr = writer.get_extra_info('peername')
-
+        peer_info = f"{addr[0]}:{addr[1]}"
         remote_server_id = message.get('server_id', 'unknown')
         remote_version = message.get('version', 'unknown')
         if remote_timestamp := message.get('timestamp', None):
@@ -276,6 +276,10 @@ class Peer:
         if self.debug:
             logging.info(f"Handshake acknowledged to {peer_info}")
 
+        receive_time = time.time()
+        send_time = self.active_peers.get(peer_info, {}).get('send_time', receive_time)
+        ping = receive_time - send_time
+
         self.active_peers[peer_info] = {
             "addr": peer_info,
             "addrlocal": f"{self.external_ip}:{addr[1]}",
@@ -283,12 +287,12 @@ class Peer:
             "server_id": remote_server_id,
             "version": remote_version,
             "lastseen": int(time.time()),
-            "ping": None
+            "ping": round(ping, 3) if 'send_time' in self.active_peers.get(peer_info, {}) else None
         }
 
         self.update_active_peers()
         asyncio.create_task(self.send_heartbeat(writer))
-        
+
     async def handle_peer_connection(self, reader, writer):
         peer_address = writer.get_extra_info('peername')
         peer_info = f"{peer_address[0]}:{peer_address[1]}"
@@ -634,6 +638,17 @@ class Peer:
         await self.send_message(writer, hello_message)
         if self.debug:
             logging.info(f"Sent hello message: {hello_message}")
+        
+        # Store send_time in active_peers for ping calculation
+        peer_info = f"{writer.get_extra_info('peername')[0]}:{writer.get_extra_info('peername')[1]}"
+        if peer_info in self.active_peers:
+            self.active_peers[peer_info]['send_time'] = time.time()
+        else:
+            self.active_peers[peer_info] = {
+                'addr': peer_info,
+                'send_time': time.time(),
+                'ping': None
+            }
 
     async def send_message(self, writer, message):
         message_data = json.dumps(message).encode('utf-8')
