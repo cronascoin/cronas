@@ -741,4 +741,3 @@ class Peer:
             self.active_peers.items(),
             key=lambda x: float(x[1]['ping']) if x[1]['ping'] is not None else float('inf')
         )[:self.max_peers])
-
