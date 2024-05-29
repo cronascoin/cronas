@@ -244,7 +244,6 @@ class Peer:
         if peer_info in self.active_peers:
             del self.active_peers[peer_info]
             logging.info(f"Removed {peer_info} from active peers due to disconnection or error.")
-            await self.schedule_reconnect(peer_info)
         self.update_active_peers()
 
     async def handle_hello_message(self, message, writer):
