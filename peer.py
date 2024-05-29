@@ -9,6 +9,7 @@ import time
 import ipaddress
 import aiofiles
 import random
+import ntplib
 import stun
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
@@ -45,6 +46,25 @@ class Peer:
         self.p2p_server = None
         self.last_peer_list_request = {}
         self.start_time = datetime.datetime.now()
+        self.ntp_offset = self.get_ntp_offset()
+
+    def get_ntp_offset(self):
+        try:
+            client = ntplib.NTPClient()
+            response = client.request('pool.ntp.org')
+            ntp_time = datetime.datetime.fromtimestamp(response.tx_time)
+            system_time = datetime.datetime.now()
+            offset = (ntp_time - system_time).total_seconds()
+            logging.info(f"NTP time: {ntp_time}, System time: {system_time}, Offset: {offset}")
+
+            # Check and log significant time discrepancies
+            if abs(offset) >= 1:
+                logging.warning(f"Significant time discrepancy detected: {offset} seconds between system time and NTP time.")
+
+            return offset
+        except Exception as e:
+            logging.error(f"Failed to get NTP time: {e}")
+            return 0
 
     def is_private_ip(self, ip):
         return ipaddress.ip_address(ip).is_private
@@ -232,6 +252,11 @@ class Peer:
 
         remote_server_id = message.get('server_id', 'unknown')
         remote_version = message.get('version', 'unknown')
+        if remote_timestamp := message.get('timestamp', None):
+            local_time = time.time() + self.ntp_offset
+            time_difference = abs(local_time - remote_timestamp)
+            if time_difference >= 1:
+                logging.warning(f"Time discrepancy detected: {time_difference} seconds with {addr[0]}:{addr[1]}")
 
         if 'listening_port' in message and isinstance(message['listening_port'], int):
             peer_port = message['listening_port']
@@ -243,7 +268,8 @@ class Peer:
             "type": "ack",
             "payload": "Handshake acknowledged",
             "version": self.version,
-            "server_id": self.server_id
+            "server_id": self.server_id,
+            "timestamp": time.time() + self.ntp_offset
         }
         writer.write(json.dumps(ack_message).encode() + b'\n')
         await writer.drain()
@@ -262,7 +288,7 @@ class Peer:
 
         self.update_active_peers()
         asyncio.create_task(self.send_heartbeat(writer))
-
+        
     async def handle_peer_connection(self, reader, writer):
         peer_address = writer.get_extra_info('peername')
         peer_info = f"{peer_address[0]}:{peer_address[1]}"
@@ -505,7 +531,8 @@ class Peer:
         self.last_peer_list_request[peer_info] = current_time
         request_message = {
             "type": "request_peer_list",
-            "server_id": self.server_id
+            "server_id": self.server_id,
+            "timestamp": time.time() + self.ntp_offset
         }
         writer.write(json.dumps(request_message).encode() + b'\n')
         await writer.drain()
@@ -524,7 +551,8 @@ class Peer:
         ack_message = {
             "type": "heartbeat_ack",
             "payload": "pong",
-            "server_id": self.server_id
+            "server_id": self.server_id,
+            "timestamp": time.time() + self.ntp_offset
         }
         writer.write(json.dumps(ack_message).encode() + b'\n')
         await writer.drain()
@@ -553,11 +581,13 @@ class Peer:
         ack_message = {
             "type": "ack",
             "version": version,
-            "server_id": server_id
+            "server_id": server_id,
+            "timestamp": time.time() + self.ntp_offset
         }
         writer.write(json.dumps(ack_message).encode() + b'\n')
         await writer.drain()
         logging.info(f"Sent ack message to peer with server_id: {server_id}")
+
 
     async def schedule_periodic_peer_save(self):
         while True:
@@ -581,7 +611,8 @@ class Peer:
                     "type": "heartbeat",
                     "payload": "ping",
                     "server_id": self.server_id,
-                    "version": self.version
+                    "version": self.version,
+                    "timestamp": time.time() + self.ntp_offset
                 }
                 writer.write(json.dumps(heartbeat_msg).encode() + b'\n')
                 await writer.drain()
@@ -597,7 +628,8 @@ class Peer:
             'host': self.external_ip,
             'port': self.external_p2p_port or self.p2p_port,
             'server_id': self.server_id,
-            'version': self.version
+            'version': self.version,
+            'timestamp': time.time() + self.ntp_offset
         }
         await self.send_message(writer, hello_message)
         if self.debug:
@@ -618,7 +650,8 @@ class Peer:
                 "type": "peer_list",
                 "payload": connecting_ports,
                 "server_id": self.server_id,
-                "version": self.version
+                "version": self.version,
+                "timestamp": time.time() + self.ntp_offset
             }
 
             writer.write(json.dumps(peer_list_message).encode() + b'\n')
@@ -708,3 +741,4 @@ class Peer:
             self.active_peers.items(),
             key=lambda x: float(x[1]['ping']) if x[1]['ping'] is not None else float('inf')
         )[:self.max_peers])
+

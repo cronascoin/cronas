@@ -18,6 +18,7 @@
         "levelname",
         "maxpeers",
         "netifaces",
+        "ntplib",
         "peername",
         "REUSEADDR",
         "REUSEPORT",
