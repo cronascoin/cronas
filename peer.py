@@ -249,7 +249,7 @@ class Peer:
 
     async def handle_hello_message(self, message, writer):
         addr = writer.get_extra_info('peername')
-        peer_info = f"{addr[0]}:{addr[1]}"
+
         remote_server_id = message.get('server_id', 'unknown')
         remote_version = message.get('version', 'unknown')
         if remote_timestamp := message.get('timestamp', None):
@@ -264,19 +264,18 @@ class Peer:
         else:
             peer_info = f"{addr[0]}:{addr[1]}"
 
-        pong_message = {
-            "type": "pong",
+        ack_message = {
+            "type": "ack",
             "payload": "Handshake acknowledged",
             "version": self.version,
             "server_id": self.server_id,
             "timestamp": time.time() + self.ntp_offset
         }
-        writer.write(json.dumps(pong_message).encode() + b'\n')
+        writer.write(json.dumps(ack_message).encode() + b'\n')
         await writer.drain()
         if self.debug:
-            logging.info(f"Pong message acknowledged to {peer_info}")
+            logging.info(f"Handshake acknowledged to {peer_info}")
 
-        # Store send_time for ping calculation
         self.active_peers[peer_info] = {
             "addr": peer_info,
             "addrlocal": f"{self.external_ip}:{addr[1]}",
@@ -284,19 +283,18 @@ class Peer:
             "server_id": remote_server_id,
             "version": remote_version,
             "lastseen": int(time.time()),
-            "send_time": time.time(),  # Record the send time of the pong message
             "ping": None
         }
 
         self.update_active_peers()
         asyncio.create_task(self.send_heartbeat(writer))
-
+        
     async def handle_peer_connection(self, reader, writer):
         peer_address = writer.get_extra_info('peername')
         peer_info = f"{peer_address[0]}:{peer_address[1]}"
 
-        if peer_info in self.active_peers:
-            logging.info(f"Duplicate connection attempt from {peer_info}. Closing new connection.")
+        if peer_info in self.connections:
+            logging.info(f"Duplicate connection attempt to {peer_info}. Closing new connection.")
             writer.close()
             await writer.wait_closed()
             return
@@ -636,17 +634,6 @@ class Peer:
         await self.send_message(writer, hello_message)
         if self.debug:
             logging.info(f"Sent hello message: {hello_message}")
-        
-        # Store send_time in active_peers for ping calculation
-        peer_info = f"{writer.get_extra_info('peername')[0]}:{writer.get_extra_info('peername')[1]}"
-        if peer_info in self.active_peers:
-            self.active_peers[peer_info]['send_time'] = time.time()
-        else:
-            self.active_peers[peer_info] = {
-                'addr': peer_info,
-                'send_time': time.time(),
-                'ping': None
-            }
 
     async def send_message(self, writer, message):
         message_data = json.dumps(message).encode('utf-8')
