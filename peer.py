@@ -130,6 +130,11 @@ class Peer:
         if peer_info not in self.connection_attempts:
             self.connection_attempts[peer_info] = 0
 
+        # Check for duplicate connections
+        if self.is_duplicate_connection(host, port):
+            logging.info(f"Duplicate connection attempt to {peer_info} detected. Skipping.")
+            return
+
         while peer_info in self.connection_attempts and self.connection_attempts[peer_info] < max_retries:
             if self.shutdown_flag:
                 logging.info(f"Shutdown in progress, cancelling connection attempts to {peer_info}.")
@@ -179,7 +184,6 @@ class Peer:
             logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
             self.connection_attempts.pop(peer_info, None)
             await self.schedule_reconnect(peer_info)
-
 
     def detect_ip_address(self):
         try:
@@ -373,6 +377,10 @@ class Peer:
             except ValueError:
                 logging.warning(f"Invalid peer address format: {peer_info}")
         self.update_active_peers()
+
+    def is_duplicate_connection(self, host, port):
+        peer_info = f"{host}:{port}"
+        return any(peer_info.split(':')[0] == existing_peer.split(':')[0] for existing_peer in self.active_peers)
 
     def is_valid_peer(self, peer_info):
         try:
@@ -738,7 +746,13 @@ class Peer:
         await asyncio.gather(*[self.close_connection(*peer.split(':')) for peer in self.connections.keys()])
 
     def update_active_peers(self):
+        unique_peers = {}
+        for peer_info, peer_data in self.active_peers.items():
+            host = peer_info.split(':')[0]
+            if host not in unique_peers or unique_peers[host]['lastseen'] < peer_data['lastseen']:
+                unique_peers[host] = peer_data
+
         self.active_peers = dict(sorted(
-            self.active_peers.items(),
+            unique_peers.items(),
             key=lambda x: float(x[1]['ping']) if x[1]['ping'] is not None else float('inf')
         )[:self.max_peers])
