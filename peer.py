@@ -1,3 +1,6 @@
+# Copyright 2024 Cronas.org
+# peer.py
+
 import asyncio
 import datetime
 import errno
@@ -11,6 +14,7 @@ import aiofiles
 import random
 import ntplib
 import stun
+
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
@@ -57,7 +61,6 @@ class Peer:
             offset = (ntp_time - system_time).total_seconds()
             logging.info(f"NTP time: {ntp_time}, System time: {system_time}, Offset: {offset}")
 
-            # Check and log significant time discrepancies
             if abs(offset) >= 1:
                 logging.warning(f"Significant time discrepancy detected: {offset} seconds between system time and NTP time.")
 
@@ -123,10 +126,14 @@ class Peer:
 
     async def connect_to_peer(self, host, port, max_retries=5):
         peer_info = f"{host}:{port}"
-        backoff_base = 5  # Base time for exponential backoff
 
         if peer_info not in self.connection_attempts:
             self.connection_attempts[peer_info] = 0
+
+        # Check for duplicate connections
+        if self.is_duplicate_connection(host, port):
+            logging.info(f"Duplicate connection attempt to {peer_info} detected. Skipping.")
+            return
 
         while peer_info in self.connection_attempts and self.connection_attempts[peer_info] < max_retries:
             if self.shutdown_flag:
@@ -141,7 +148,6 @@ class Peer:
                 reader, writer = await asyncio.open_connection(host, port)
                 local_addr, local_port = writer.get_extra_info('sockname')
 
-                # Send HELLO message and record the send time
                 send_time = time.time()
                 await self.send_hello_message(writer)
 
@@ -153,13 +159,12 @@ class Peer:
                     'addr': peer_info,
                     'addrlocal': f"{self.external_ip}:{local_port}",
                     'addrbind': f"{self.external_ip}:{local_port}",
-                    'server_id': "unknown",  # Initialize with unknown, will be updated upon receiving ack
-                    'version': "unknown",    # Initialize with unknown, will be updated upon receiving ack
+                    'server_id': "unknown",
+                    'version': "unknown",
                     'lastseen': int(time.time()),
-                    'ping': None  # Initialize ping with None
+                    'ping': None
                 }
 
-                # Store the send time to calculate ping later
                 self.active_peers[peer_info]['send_time'] = send_time
 
                 asyncio.create_task(self.listen_for_messages(reader, writer))
@@ -173,15 +178,12 @@ class Peer:
             except Exception as e:
                 logging.error(f"Error connecting to {host}:{port}: {e}")
                 self.connection_attempts[peer_info] += 1
-                backoff_time = backoff_base * (2 ** self.connection_attempts[peer_info]) + random.uniform(0, 1)
-                logging.info(f"Retrying connection to {peer_info} in {backoff_time:.2f} seconds.")
-                await asyncio.sleep(backoff_time)
+                await asyncio.sleep(min(self.connection_attempts[peer_info] * 5, 60))  # Increasing sleep time for each retry
 
         if peer_info in self.connection_attempts:
             logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
             self.connection_attempts.pop(peer_info, None)
-            await self.handle_disconnection(peer_info)
-            return
+            await self.schedule_reconnect(peer_info)
 
     def detect_ip_address(self):
         try:
@@ -208,13 +210,12 @@ class Peer:
         addrlocal = f"{self.external_ip}:{local_port}"
         addrbind = f"{self.external_ip}:{local_port}"
 
-        if remote_server_id in self.active_peers:
+        if peer_info in self.active_peers:
             receive_time = time.time()
-            send_time = self.active_peers[remote_server_id].get('send_time', receive_time)
+            send_time = self.active_peers[peer_info].get('send_time', receive_time)
             ping = receive_time - send_time
 
-            self.active_peers[remote_server_id].update({
-                "addr": peer_info,
+            self.active_peers[peer_info].update({
                 "addrlocal": addrlocal,
                 "addrbind": addrbind,
                 "server_id": remote_server_id,
@@ -223,7 +224,7 @@ class Peer:
                 "ping": round(ping, 3)
             })
         else:
-            self.active_peers[remote_server_id] = {
+            self.active_peers[peer_info] = {
                 "addr": peer_info,
                 "addrlocal": addrlocal,
                 "addrbind": addrbind,
@@ -246,19 +247,10 @@ class Peer:
         if peer_info in self.peers:
             self.peers[peer_info] = int(time.time())
             await self.schedule_rewrite()
-
-        if server_id_to_remove := next(
-            (
-                server_id
-                for server_id, peer in self.active_peers.items()
-                if peer['addr'] == peer_info
-            ),
-            None,
-        ):
-            del self.active_peers[server_id_to_remove]
+        if peer_info in self.active_peers:
+            del self.active_peers[peer_info]
             logging.info(f"Removed {peer_info} from active peers due to disconnection or error.")
             await self.schedule_reconnect(peer_info)
-
         self.update_active_peers()
 
     async def handle_hello_message(self, message, writer):
@@ -290,7 +282,7 @@ class Peer:
         if self.debug:
             logging.info(f"Handshake acknowledged to {peer_info}")
 
-        self.active_peers[remote_server_id] = {
+        self.active_peers[peer_info] = {
             "addr": peer_info,
             "addrlocal": f"{self.external_ip}:{addr[1]}",
             "addrbind": f"{self.external_ip}:{addr[1]}",
@@ -302,7 +294,7 @@ class Peer:
 
         self.update_active_peers()
         asyncio.create_task(self.send_heartbeat(writer))
-
+        
     async def handle_peer_connection(self, reader, writer):
         peer_address = writer.get_extra_info('peername')
         peer_info = f"{peer_address[0]}:{peer_address[1]}"
@@ -350,12 +342,12 @@ class Peer:
 
         valid_new_peers = {
             peer_info: self.peers.get(peer_info, 0) for peer_info in new_peers
-            if self.is_valid_peer(peer_info)
+            if self.validate_peer_info(peer_info)
         }
 
         invalid_peers = [
             peer_info for peer_info in new_peers
-            if not self.is_valid_peer(peer_info)
+            if not self.validate_peer_info(peer_info)
         ]
 
         for invalid_peer in invalid_peers:
@@ -385,6 +377,10 @@ class Peer:
             except ValueError:
                 logging.warning(f"Invalid peer address format: {peer_info}")
         self.update_active_peers()
+
+    def is_duplicate_connection(self, host, port):
+        peer_info = f"{host}:{port}"
+        return any(peer_info.split(':')[0] == existing_peer.split(':')[0] for existing_peer in self.active_peers)
 
     def is_valid_peer(self, peer_info):
         try:
@@ -555,10 +551,9 @@ class Peer:
     async def respond_to_heartbeat(self, writer, message):
         peer_info = writer.get_extra_info('peername')
         peer_info_str = f"{peer_info[0]}:{peer_info[1]}"
-        remote_server_id = message.get("server_id", "unknown")
 
-        if remote_server_id in self.active_peers:
-            self.active_peers[remote_server_id]['lastseen'] = int(time.time())
+        if peer_info_str in self.active_peers:
+            self.active_peers[peer_info_str]['lastseen'] = int(time.time())
             self.peers_changed = True
             if self.debug:
                 logging.info(f"Updated last seen for {peer_info_str}")
@@ -572,7 +567,7 @@ class Peer:
         writer.write(json.dumps(ack_message).encode() + b'\n')
         await writer.drain()
         if self.debug:
-            logging.info(f"Sent heartbeat acknowledgment to {peer_info_str}.")
+            logging.info(f"Sent heartbeat acknowledgment to {peer_info_str} with timestamp.")
 
     async def rewrite_peers_file(self):
         if not self.peers_changed:
@@ -602,7 +597,6 @@ class Peer:
         writer.write(json.dumps(ack_message).encode() + b'\n')
         await writer.drain()
         logging.info(f"Sent ack message to peer with server_id: {server_id}")
-
 
     async def schedule_periodic_peer_save(self):
         while True:
@@ -658,12 +652,14 @@ class Peer:
     async def send_peer_list(self, writer):
         logging.info("Attempting to send peer list...")
 
-        if connecting_ports := [
-            peer for peer in self.active_peers.keys() if self.is_valid_peer(peer)
+        if valid_peers := [
+            peer
+            for peer in self.active_peers.keys()
+            if self.validate_peer_info(peer)
         ]:
             peer_list_message = {
                 "type": "peer_list",
-                "payload": connecting_ports,
+                "payload": valid_peers,
                 "server_id": self.server_id,
                 "version": self.version,
                 "timestamp": time.time() + self.ntp_offset
@@ -752,7 +748,24 @@ class Peer:
         await asyncio.gather(*[self.close_connection(*peer.split(':')) for peer in self.connections.keys()])
 
     def update_active_peers(self):
+        unique_peers = {}
+        for peer_info, peer_data in self.active_peers.items():
+            host = peer_info.split(':')[0]
+            if host not in unique_peers or unique_peers[host]['lastseen'] < peer_data['lastseen']:
+                unique_peers[host] = peer_data
+
         self.active_peers = dict(sorted(
-            self.active_peers.items(),
+            unique_peers.items(),
             key=lambda x: float(x[1]['ping']) if x[1]['ping'] is not None else float('inf')
         )[:self.max_peers])
+
+    def validate_peer_info(self, peer_info):
+        try:
+            host, port = peer_info.split(':')
+            if not (host and port):
+                raise ValueError("Host or port missing")
+            port = int(port)
+            return True
+        except Exception as e:
+            logging.error(f"Invalid peer address '{peer_info}': {e}")
+            return False
