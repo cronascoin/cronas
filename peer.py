@@ -139,7 +139,7 @@ class Peer:
                 local_addr, local_port = writer.get_extra_info('sockname')
 
                 send_time = time.time()
-                await self.send_hello_message(writer)
+                await self.send_hello_message(writer, send_time)
 
                 await self.request_peer_list(writer, peer_info)
 
@@ -268,7 +268,8 @@ class Peer:
             "server_id": remote_server_id,
             "version": remote_version,
             "lastseen": int(time.time()),
-            "ping": None
+            "ping": None,
+            "send_time": message.get('timestamp', time.time())  # Store send time from the hello message
         }
 
         self.update_active_peers()
@@ -606,14 +607,14 @@ class Peer:
         except Exception as e:
             logging.error(f"Error sending heartbeat: {e}")
 
-    async def send_hello_message(self, writer):
+    async def send_hello_message(self, writer, send_time):
         hello_message = {
             'type': 'hello',
             'host': self.external_ip,
             'port': self.external_p2p_port or self.p2p_port,
             'server_id': self.server_id,
             'version': self.version,
-            'timestamp': time.time() + self.ntp_offset
+            'timestamp': send_time
         }
         await self.send_message(writer, hello_message)
         if self.debug:
@@ -628,7 +629,7 @@ class Peer:
         logging.info("Attempting to send peer list...")
 
         if connecting_ports := [
-            peer for peer in self.active_peers.values() if self.is_valid_peer(peer['addr'])
+            peer['addr'] for peer in self.active_peers.values() if self.is_valid_peer(peer['addr'])
         ]:
             peer_list_message = {
                 "type": "peer_list",
