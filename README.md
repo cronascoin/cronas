@@ -23,7 +23,7 @@ sudo apt install python3-pip
 apt update && apt upgrade -y
 ```
 ```
-pip install aiohttp aiofiles upnpclient pystun3
+pip install aiohttp aiofiles pystun3 ntplib
 ```
 ```
 git clone https://github.com/cronascoin/cronas.git

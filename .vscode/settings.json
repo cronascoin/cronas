@@ -20,6 +20,7 @@
         "netifaces",
         "ntplib",
         "peername",
+        "pystun",
         "REUSEADDR",
         "REUSEPORT",
         "routable",
