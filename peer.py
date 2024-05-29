@@ -1,3 +1,6 @@
+# Copyright 2024 Cronas.org
+# peer.py
+
 import asyncio
 import datetime
 import errno
@@ -11,6 +14,7 @@ import aiofiles
 import random
 import ntplib
 import stun
+
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
@@ -57,7 +61,6 @@ class Peer:
             offset = (ntp_time - system_time).total_seconds()
             logging.info(f"NTP time: {ntp_time}, System time: {system_time}, Offset: {offset}")
 
-            # Check and log significant time discrepancies
             if abs(offset) >= 1:
                 logging.warning(f"Significant time discrepancy detected: {offset} seconds between system time and NTP time.")
 
@@ -140,7 +143,6 @@ class Peer:
                 reader, writer = await asyncio.open_connection(host, port)
                 local_addr, local_port = writer.get_extra_info('sockname')
 
-                # Send HELLO message and record the send time
                 send_time = time.time()
                 await self.send_hello_message(writer)
 
@@ -152,13 +154,12 @@ class Peer:
                     'addr': peer_info,
                     'addrlocal': f"{self.external_ip}:{local_port}",
                     'addrbind': f"{self.external_ip}:{local_port}",
-                    'server_id': "unknown",  # Initialize with unknown, will be updated upon receiving ack
-                    'version': "unknown",    # Initialize with unknown, will be updated upon receiving ack
+                    'server_id': "unknown",
+                    'version': "unknown",
                     'lastseen': int(time.time()),
-                    'ping': None  # Initialize ping with None
+                    'ping': None
                 }
 
-                # Store the send time to calculate ping later
                 self.active_peers[peer_info]['send_time'] = send_time
 
                 asyncio.create_task(self.listen_for_messages(reader, writer))
@@ -557,7 +558,7 @@ class Peer:
         writer.write(json.dumps(ack_message).encode() + b'\n')
         await writer.drain()
         if self.debug:
-            logging.info(f"Sent heartbeat acknowledgment to {peer_info_str}.")
+            logging.info(f"Sent heartbeat acknowledgment to {peer_info_str} with timestamp.")
 
     async def rewrite_peers_file(self):
         if not self.peers_changed:
@@ -587,7 +588,6 @@ class Peer:
         writer.write(json.dumps(ack_message).encode() + b'\n')
         await writer.drain()
         logging.info(f"Sent ack message to peer with server_id: {server_id}")
-
 
     async def schedule_periodic_peer_save(self):
         while True:
@@ -741,4 +741,3 @@ class Peer:
             self.active_peers.items(),
             key=lambda x: float(x[1]['ping']) if x[1]['ping'] is not None else float('inf')
         )[:self.max_peers])
-

@@ -1,3 +1,6 @@
+# Copyright 2024 Cronas.org
+# crypto.py
+
 from peer import Peer
 
 

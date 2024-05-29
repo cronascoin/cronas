@@ -1,3 +1,4 @@
+# Copyright 2024 Cronas.org
 # app.py
 
 import asyncio
