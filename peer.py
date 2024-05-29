@@ -57,10 +57,8 @@ class Peer:
             offset = (ntp_time - system_time).total_seconds()
             logging.info(f"NTP time: {ntp_time}, System time: {system_time}, Offset: {offset}")
 
-            # Check and log significant time discrepancies
             if abs(offset) >= 1:
                 logging.warning(f"Significant time discrepancy detected: {offset} seconds between system time and NTP time.")
-
             return offset
         except Exception as e:
             logging.error(f"Failed to get NTP time: {e}")
@@ -140,26 +138,12 @@ class Peer:
                 reader, writer = await asyncio.open_connection(host, port)
                 local_addr, local_port = writer.get_extra_info('sockname')
 
-                # Send HELLO message and record the send time
                 send_time = time.time()
                 await self.send_hello_message(writer)
 
-                if peer_info not in self.connections:
-                    await self.request_peer_list(writer, peer_info)
+                await self.request_peer_list(writer, peer_info)
 
                 self.connections[peer_info] = (reader, writer)
-                self.active_peers[peer_info] = {
-                    'addr': peer_info,
-                    'addrlocal': f"{self.external_ip}:{local_port}",
-                    'addrbind': f"{self.external_ip}:{local_port}",
-                    'server_id': "unknown",  # Initialize with unknown, will be updated upon receiving ack
-                    'version': "unknown",    # Initialize with unknown, will be updated upon receiving ack
-                    'lastseen': int(time.time()),
-                    'ping': None  # Initialize ping with None
-                }
-
-                # Store the send time to calculate ping later
-                self.active_peers[peer_info]['send_time'] = send_time
 
                 asyncio.create_task(self.listen_for_messages(reader, writer))
                 asyncio.create_task(self.send_heartbeat(writer, peer_info))
@@ -205,12 +189,13 @@ class Peer:
         addrlocal = f"{self.external_ip}:{local_port}"
         addrbind = f"{self.external_ip}:{local_port}"
 
-        if peer_info in self.active_peers:
+        if remote_server_id in self.active_peers:
             receive_time = time.time()
-            send_time = self.active_peers[peer_info].get('send_time', receive_time)
+            send_time = self.active_peers[remote_server_id].get('send_time', receive_time)
             ping = receive_time - send_time
 
-            self.active_peers[peer_info].update({
+            self.active_peers[remote_server_id].update({
+                "addr": peer_info,
                 "addrlocal": addrlocal,
                 "addrbind": addrbind,
                 "server_id": remote_server_id,
@@ -219,7 +204,7 @@ class Peer:
                 "ping": round(ping, 3)
             })
         else:
-            self.active_peers[peer_info] = {
+            self.active_peers[remote_server_id] = {
                 "addr": peer_info,
                 "addrlocal": addrlocal,
                 "addrbind": addrbind,
@@ -229,7 +214,7 @@ class Peer:
                 "ping": None
             }
 
-        logging.info(f"Connection fully established with {peer_info}, version {remote_version}, server_id {remote_server_id}")
+        logging.info(f"Connection fully established with {remote_server_id}, version {remote_version}")
         self.update_active_peers()
         self.mark_peer_changed()
         await self.schedule_rewrite()
@@ -276,7 +261,7 @@ class Peer:
         if self.debug:
             logging.info(f"Handshake acknowledged to {peer_info}")
 
-        self.active_peers[peer_info] = {
+        self.active_peers[remote_server_id] = {
             "addr": peer_info,
             "addrlocal": f"{self.external_ip}:{addr[1]}",
             "addrbind": f"{self.external_ip}:{addr[1]}",
@@ -288,7 +273,7 @@ class Peer:
 
         self.update_active_peers()
         asyncio.create_task(self.send_heartbeat(writer))
-        
+
     async def handle_peer_connection(self, reader, writer):
         peer_address = writer.get_extra_info('peername')
         peer_info = f"{peer_address[0]}:{peer_address[1]}"
@@ -522,7 +507,7 @@ class Peer:
         current_time = time.time()
         if peer_info in self.last_peer_list_request:
             last_request_time = self.last_peer_list_request[peer_info]
-            cooldown_period = 300  # Cooldown period in seconds (e.g., 5 minutes)
+            cooldown_period = 300
 
             if current_time - last_request_time < cooldown_period:
                 logging.info(f"Skipping peer list request to {peer_info} (cooldown period not yet passed)")
@@ -588,7 +573,6 @@ class Peer:
         await writer.drain()
         logging.info(f"Sent ack message to peer with server_id: {server_id}")
 
-
     async def schedule_periodic_peer_save(self):
         while True:
             await asyncio.sleep(60)
@@ -644,7 +628,7 @@ class Peer:
         logging.info("Attempting to send peer list...")
 
         if connecting_ports := [
-            peer for peer in self.active_peers.keys() if self.is_valid_peer(peer)
+            peer for peer in self.active_peers.values() if self.is_valid_peer(peer['addr'])
         ]:
             peer_list_message = {
                 "type": "peer_list",
