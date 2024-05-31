@@ -314,15 +314,24 @@ class Peer:
         
     async def handle_peer_connection(self, reader, writer):
         peer_address = writer.get_extra_info('peername')
-        peer_info = f"{peer_address[0]}:{peer_address[1]}"
+        #peer_info = f"{peer_address[0]}:{peer_address[1]}"
+        
+        # Assuming you have a method to get a unique server_id for each peer
+        server_id = await self.get_server_id_for_peer(reader, writer)
 
-        if peer_info in self.connections:
-            logging.info(f"Duplicate connection attempt to {peer_info}. Closing new connection.")
+        if server_id in self.connections:
+            logging.info(f"Duplicate connection attempt to {server_id}. Closing new connection.")
             writer.close()
             await writer.wait_closed()
             return
 
-        self.connections[peer_info] = (reader, writer)
+        self.connections[server_id] = (reader, writer)
+        self.active_peers[server_id] = {
+            'host': peer_address[0],
+            'port': peer_address[1],
+            'version': '1.0.0',  # Example version, you can update as needed
+            # Add other relevant peer information here
+        }
 
         try:
             buffer = ''
@@ -360,7 +369,8 @@ class Peer:
                 writer.close()
                 await writer.wait_closed()
             logging.info(f"Connection with {peer_address} closed.")
-            await self.handle_disconnection(peer_info)
+            del self.active_peers[server_id]
+            await self.handle_disconnection(server_id)
 
     async def handle_peer_list_message(self, message):
         new_peers = message.get("payload", [])
