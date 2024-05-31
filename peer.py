@@ -15,9 +15,31 @@ import stun
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
 def get_stun_info():
-    nat_type, external_ip, external_port = stun.get_ip_info(stun_host='stun.l.google.com', stun_port=19302)
-    logging.info(f"NAT Type: {nat_type}, External IP: {external_ip}, External Port: {external_port}")
-    return external_ip, external_port
+    try:
+        nat_type, external_ip, external_port = stun.get_ip_info(stun_host='stun.l.google.com', stun_port=19302)
+        logging.info(f"NAT Type: {nat_type}, External IP: {external_ip}, External Port: {external_port}")
+        return external_ip, external_port
+    except Exception as e:
+        logging.error(f"Failed to get IP info via STUN: {e}")
+        return None, None
+
+def get_out_ip():
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(('8.8.8.8', 80))
+            ip = s.getsockname()[0]
+        logging.info(f"External IP via socket: {ip}")
+        return ip
+    except Exception as e:
+        logging.error(f"Failed to detect external IP address via socket: {e}")
+        return None
+
+def get_external_ip():
+    external_ip, external_port = get_stun_info()
+    if external_ip:
+        return external_ip, external_port
+    external_ip = get_out_ip()
+    return external_ip, None
 
 class Peer:
     def __init__(self, host, p2p_port, server_id, version, max_peers=10, config=None):
@@ -26,7 +48,7 @@ class Peer:
         self.p2p_port = p2p_port
         self.peers = {}
         self.active_peers = {}
-        self.external_ip, self.external_p2p_port = get_stun_info()
+        self.external_ip, self.external_p2p_port = get_external_ip()
         self.hello_seq = 0
         self.version = version
         self.file_lock = asyncio.Lock()
@@ -309,12 +331,21 @@ class Peer:
                 if not data:
                     break
 
-                buffer += data.decode()
+                try:
+                    buffer += data.decode('utf-8')
+                except UnicodeDecodeError as e:
+                    logging.error(f"Unicode decode error with {peer_address}: {e}")
+                    break
+
                 while '\n' in buffer:
                     message, buffer = buffer.split('\n', 1)
                     if message:
-                        message_obj = json.loads(message)
-                        await self.process_message(message_obj, writer)
+                        try:
+                            message_obj = json.loads(message)
+                            await self.process_message(message_obj, writer)
+                        except json.JSONDecodeError as e:
+                            logging.warning(f"JSON decode error with {peer_address}: {e}")
+                            break
 
         except asyncio.CancelledError:
             logging.info(f"Connection task with {peer_address} cancelled")
