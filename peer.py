@@ -57,7 +57,6 @@ class Peer:
             offset = (ntp_time - system_time).total_seconds()
             logging.info(f"NTP time: {ntp_time}, System time: {system_time}, Offset: {offset}")
 
-            # Check and log significant time discrepancies
             if abs(offset) >= 1:
                 logging.warning(f"Significant time discrepancy detected: {offset} seconds between system time and NTP time.")
 
@@ -92,6 +91,10 @@ class Peer:
         available_peers = [
             peer for peer in self.peers if peer not in self.active_peers and peer not in self.peers_connecting
         ]
+        if not available_peers:
+            logging.info("No available peers to connect.")
+            return
+
         peers_to_connect = random.sample(available_peers, min(self.max_peers, len(available_peers)))
 
         self.peers_connecting.update(peers_to_connect)
@@ -140,7 +143,6 @@ class Peer:
                 reader, writer = await asyncio.open_connection(host, port)
                 local_addr, local_port = writer.get_extra_info('sockname')
 
-                # Send HELLO message and record the send time
                 send_time = time.time()
                 await self.send_hello_message(writer)
 
@@ -152,13 +154,12 @@ class Peer:
                     'addr': peer_info,
                     'addrlocal': f"{self.external_ip}:{local_port}",
                     'addrbind': f"{self.external_ip}:{local_port}",
-                    'server_id': "unknown",  # Initialize with unknown, will be updated upon receiving ack
-                    'version': "unknown",    # Initialize with unknown, will be updated upon receiving ack
+                    'server_id': "unknown",
+                    'version': "unknown",
                     'lastseen': int(time.time()),
-                    'ping': None  # Initialize ping with None
+                    'ping': None
                 }
 
-                # Store the send time to calculate ping later
                 self.active_peers[peer_info]['send_time'] = send_time
 
                 asyncio.create_task(self.listen_for_messages(reader, writer))
@@ -522,7 +523,7 @@ class Peer:
         current_time = time.time()
         if peer_info in self.last_peer_list_request:
             last_request_time = self.last_peer_list_request[peer_info]
-            cooldown_period = 300  # Cooldown period in seconds (e.g., 5 minutes)
+            cooldown_period = 300
 
             if current_time - last_request_time < cooldown_period:
                 logging.info(f"Skipping peer list request to {peer_info} (cooldown period not yet passed)")
@@ -587,7 +588,6 @@ class Peer:
         writer.write(json.dumps(ack_message).encode() + b'\n')
         await writer.drain()
         logging.info(f"Sent ack message to peer with server_id: {server_id}")
-
 
     async def schedule_periodic_peer_save(self):
         while True:
