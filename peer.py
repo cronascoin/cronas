@@ -316,27 +316,50 @@ class Peer:
         peer_address = writer.get_extra_info('peername')
         peer_info = f"{peer_address[0]}:{peer_address[1]}"
 
-        if peer_info in self.connections:
-            logging.info(f"Duplicate connection attempt to {peer_info}. Closing new connection.")
-            writer.close()
-            await writer.wait_closed()
-            return
-
-        self.connections[peer_info] = (reader, writer)
-
+        # Read initial data to get server_id
         try:
-            buffer = ''
+            initial_data = await reader.read(1024)
+            initial_message = json.loads(initial_data.decode('utf-8'))
+            server_id = initial_message.get('server_id')
+            
+            if not server_id:
+                logging.info(f"Connection attempt from {peer_info} missing server_id. Closing connection.")
+                writer.close()
+                await writer.wait_closed()
+                return
+
+            # Check if there's already an active connection with the same server_id
+            if server_id in self.active_peers:
+                logging.info(f"Duplicate connection attempt from server_id {server_id}. Closing new connection.")
+                writer.close()
+                await writer.wait_closed()
+                return
+
+            self.connections[peer_info] = (reader, writer)
+
+            # Process the initial message
+            await self.process_message(initial_message, writer)
+
+            buffer = b''  # Initialize as bytes
             while True:
                 data = await reader.read(1024)
                 if not data:
                     break
 
-                buffer += data.decode()
-                while '\n' in buffer:
-                    message, buffer = buffer.split('\n', 1)
-                    if message:
-                        message_obj = json.loads(message)
-                        await self.process_message(message_obj, writer)
+                buffer += data
+                while b'\n' in buffer:
+                    message_bytes, buffer = buffer.split(b'\n', 1)
+                    if message_bytes:
+                        try:
+                            message = message_bytes.decode('utf-8')
+                            message_obj = json.loads(message)
+                            await self.process_message(message_obj, writer)
+                        except UnicodeDecodeError:
+                            logging.error(f"Failed to decode message from {peer_info}: invalid UTF-8 data.")
+                            break
+                        except json.JSONDecodeError:
+                            logging.error(f"Failed to parse JSON message from {peer_info}: {message_bytes}")
+                            break
 
         except asyncio.CancelledError:
             logging.info(f"Connection task with {peer_address} cancelled")
@@ -352,7 +375,6 @@ class Peer:
                 await writer.wait_closed()
             logging.info(f"Connection with {peer_address} closed.")
             await self.handle_disconnection(peer_info)
-
     async def handle_peer_list_message(self, message):
         new_peers = message.get("payload", [])
         logging.info("Processing new peer list...")
