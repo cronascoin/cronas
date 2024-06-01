@@ -325,18 +325,26 @@ class Peer:
         self.connections[peer_info] = (reader, writer)
 
         try:
-            buffer = ''
+            buffer = b''  # Initialize as bytes
             while True:
                 data = await reader.read(1024)
                 if not data:
                     break
 
-                buffer += data.decode()
-                while '\n' in buffer:
-                    message, buffer = buffer.split('\n', 1)
-                    if message:
-                        message_obj = json.loads(message)
-                        await self.process_message(message_obj, writer)
+                buffer += data
+                while b'\n' in buffer:
+                    message_bytes, buffer = buffer.split(b'\n', 1)
+                    if message_bytes:
+                        try:
+                            message = message_bytes.decode('utf-8')
+                            message_obj = json.loads(message)
+                            await self.process_message(message_obj, writer)
+                        except UnicodeDecodeError:
+                            logging.error(f"Failed to decode message from {peer_info}: invalid UTF-8 data.")
+                            break
+                        except json.JSONDecodeError:
+                            logging.error(f"Failed to parse JSON message from {peer_info}: {message_bytes}")
+                            break
 
         except asyncio.CancelledError:
             logging.info(f"Connection task with {peer_address} cancelled")
