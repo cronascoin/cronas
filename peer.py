@@ -316,12 +316,11 @@ class Peer:
         peer_address = writer.get_extra_info('peername')
         peer_info = f"{peer_address[0]}:{peer_address[1]}"
 
-        # Read initial data to get server_id
         try:
             initial_data = await reader.read(1024)
             initial_message = json.loads(initial_data.decode('utf-8'))
             server_id = initial_message.get('server_id')
-            
+
             if not server_id:
                 logging.info(f"Connection attempt from {peer_info} missing server_id. Closing connection.")
                 writer.close()
@@ -336,6 +335,11 @@ class Peer:
                 return
 
             self.connections[peer_info] = (reader, writer)
+            self.active_peers[server_id] = {
+                'addr': peer_info,
+                'reader': reader,
+                'writer': writer
+            }
 
             # Process the initial message
             await self.process_message(initial_message, writer)
@@ -375,6 +379,7 @@ class Peer:
                 await writer.wait_closed()
             logging.info(f"Connection with {peer_address} closed.")
             await self.handle_disconnection(peer_info)
+
     async def handle_peer_list_message(self, message):
         new_peers = message.get("payload", [])
         logging.info("Processing new peer list...")
