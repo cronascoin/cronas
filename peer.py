@@ -170,7 +170,7 @@ class Peer:
                 # Wait for ack message to get server_id
                 ack_message = await self.receive_message(reader)
                 if ack_message.get("type") != "ack":
-                    raise Exception("Did not receive ack message")
+                    raise ConnectionError("Did not receive ack message")
                 server_id = ack_message.get("server_id")
 
                 if server_id in self.active_peers:
@@ -202,6 +202,11 @@ class Peer:
                 await self.schedule_rewrite()
                 return
 
+            except ConnectionError as e:
+                if self.debug:
+                    logging.error(f"Connection error while connecting to {host}:{port}: {e}")
+                self.connection_attempts[peer_info] += 1
+                await asyncio.sleep(self.connection_attempts[peer_info] * 5)
             except Exception as e:
                 if self.debug:
                     logging.error(f"Error connecting to {host}:{port}: {e}")
@@ -282,6 +287,7 @@ class Peer:
         self.update_active_peers()
         self.peers_changed = True
         await self.schedule_rewrite()
+        await self.schedule_reconnect(peer_info)
 
     async def handle_hello_message(self, message, writer):
         addr = writer.get_extra_info('peername')
@@ -560,6 +566,7 @@ class Peer:
                 logging.info(f"{peer_info} is already active or attempting to reconnect.")
                 break
 
+
     async def request_peer_list(self, writer, peer_info):
         current_time = time.time()
         if peer_info in self.last_peer_list_request:
@@ -675,6 +682,7 @@ class Peer:
         send_time = time.time()  # Set send time
         await self.send_message(writer, hello_message)
         return send_time  # Return send time
+
 
     async def send_message(self, writer, message):
         message_data = json.dumps(message).encode('utf-8')
