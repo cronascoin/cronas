@@ -165,27 +165,37 @@ class Peer:
                 reader, writer = await asyncio.open_connection(host, port)
                 local_addr, local_port = writer.get_extra_info('sockname')
 
-                send_time = time.time()
-                await self.send_hello_message(writer)
+                send_time = await self.send_hello_message(writer)  # Get send time from hello message
 
-                if peer_info not in self.connections:
-                    await self.request_peer_list(writer, peer_info)
+                # Wait for ack message to get server_id
+                ack_message = await self.receive_message(reader)
+                if ack_message.get("type") != "ack":
+                    raise Exception("Did not receive ack message")
+                server_id = ack_message.get("server_id")
+
+                if server_id in self.active_peers:
+                    logging.info(f"Duplicate connection detected for server_id {server_id}. Closing new connection.")
+                    writer.close()
+                    await writer.wait_closed()
+                    return
+
+                receive_time = time.time()  # Calculate receive time
+                ping = receive_time - send_time  # Calculate ping time
 
                 self.connections[peer_info] = (reader, writer)
-                self.active_peers[peer_info] = {
+                self.active_peers[server_id] = {
                     'addr': peer_info,
                     'addrlocal': f"{self.external_ip}:{local_port}",
                     'addrbind': f"{self.external_ip}:{local_port}",
-                    'server_id': "unknown",
-                    'version': "unknown",
+                    'server_id': server_id,
+                    'version': ack_message.get("version", "unknown"),
                     'lastseen': int(time.time()),
-                    'ping': None
+                    'ping': round(ping, 3),  # Store ping time
+                    'send_time': send_time,
                 }
 
-                self.active_peers[peer_info]['send_time'] = send_time
-
                 asyncio.create_task(self.listen_for_messages(reader, writer))
-                asyncio.create_task(self.send_heartbeat(writer, peer_info))
+                asyncio.create_task(self.send_heartbeat(writer, server_id))
 
                 self.peers[peer_info] = int(time.time())
                 self.peers_changed = True
@@ -202,6 +212,10 @@ class Peer:
             logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
             self.connection_attempts.pop(peer_info, None)
             return
+
+    async def receive_message(self, reader):
+        data = await reader.readuntil(separator=b'\n')
+        return json.loads(data.decode())
 
     def detect_ip_address(self):
         try:
@@ -228,29 +242,25 @@ class Peer:
         addrlocal = f"{self.external_ip}:{local_port}"
         addrbind = f"{self.external_ip}:{local_port}"
 
-        if peer_info in self.active_peers:
-            receive_time = time.time()
-            send_time = self.active_peers[peer_info].get('send_time', receive_time)
-            ping = receive_time - send_time
+        if remote_server_id in self.active_peers:
+            logging.info(f"Duplicate connection detected for server_id {remote_server_id}. Closing new connection.")
+            writer.close()
+            await writer.wait_closed()
+            return
 
-            self.active_peers[peer_info].update({
-                "addrlocal": addrlocal,
-                "addrbind": addrbind,
-                "server_id": remote_server_id,
-                "version": remote_version,
-                "lastseen": int(time.time()),
-                "ping": round(ping, 3)
-            })
-        else:
-            self.active_peers[peer_info] = {
-                "addr": peer_info,
-                "addrlocal": addrlocal,
-                "addrbind": addrbind,
-                "server_id": remote_server_id,
-                "version": remote_version,
-                "lastseen": int(time.time()),
-                "ping": None
-            }
+        receive_time = time.time()
+        send_time = self.active_peers.get(remote_server_id, {}).get('send_time', receive_time)
+        ping = receive_time - send_time
+
+        self.active_peers[remote_server_id] = {
+            "addr": peer_info,
+            "addrlocal": addrlocal,
+            "addrbind": addrbind,
+            "server_id": remote_server_id,
+            "version": remote_version,
+            "lastseen": int(time.time()),
+            "ping": round(ping, 3)
+        }
 
         logging.info(f"Connection fully established with {peer_info}, version {remote_version}, server_id {remote_server_id}")
         self.update_active_peers()
@@ -258,17 +268,20 @@ class Peer:
         await self.schedule_rewrite()
         asyncio.create_task(self.send_heartbeat(writer))
 
+
     async def handle_disconnection(self, peer_info):
         if self.shutdown_flag:
             return
 
-        if peer_info in self.peers:
-            self.peers[peer_info] = int(time.time())
-            await self.schedule_rewrite()
-        if peer_info in self.active_peers:
-            del self.active_peers[peer_info]
-            logging.info(f"Removed {peer_info} from active peers due to disconnection or error.")
+        for server_id, peer_data in self.active_peers.items():
+            if peer_data["addr"] == peer_info:
+                del self.active_peers[server_id]
+                logging.info(f"Removed {peer_info} from active peers due to disconnection or error.")
+                break
+
         self.update_active_peers()
+        self.peers_changed = True
+        await self.schedule_rewrite()
 
     async def handle_hello_message(self, message, writer):
         addr = writer.get_extra_info('peername')
@@ -299,7 +312,13 @@ class Peer:
         if self.debug:
             logging.info(f"Handshake acknowledged to {peer_info}")
 
-        self.active_peers[peer_info] = {
+        if remote_server_id in self.active_peers:
+            logging.info(f"Duplicate connection detected for server_id {remote_server_id}. Closing new connection.")
+            writer.close()
+            await writer.wait_closed()
+            return
+
+        self.active_peers[remote_server_id] = {
             "addr": peer_info,
             "addrlocal": f"{self.external_ip}:{addr[1]}",
             "addrbind": f"{self.external_ip}:{addr[1]}",
@@ -311,7 +330,7 @@ class Peer:
 
         self.update_active_peers()
         asyncio.create_task(self.send_heartbeat(writer))
-        
+
     async def handle_peer_connection(self, reader, writer):
         peer_address = writer.get_extra_info('peername')
         peer_info = f"{peer_address[0]}:{peer_address[1]}"
@@ -621,7 +640,7 @@ class Peer:
             self.file_write_scheduled = True
             asyncio.create_task(self._rewrite_after_delay())
 
-    async def send_heartbeat(self, writer, peer_info=None):
+    async def send_heartbeat(self, writer, server_id=None):
         await asyncio.sleep(60)
         try:
             while not writer.is_closing():
@@ -653,9 +672,9 @@ class Peer:
             'version': self.version,
             'timestamp': time.time() + self.ntp_offset
         }
+        send_time = time.time()  # Set send time
         await self.send_message(writer, hello_message)
-        if self.debug:
-            logging.info(f"Sent hello message: {hello_message}")
+        return send_time  # Return send time
 
     async def send_message(self, writer, message):
         message_data = json.dumps(message).encode('utf-8')
@@ -666,7 +685,7 @@ class Peer:
         logging.info("Attempting to send peer list...")
 
         if connecting_ports := [
-            peer for peer in self.active_peers.keys() if self.is_valid_peer(peer)
+            peer_data["addr"] for peer_data in self.active_peers.values() if self.is_valid_peer(peer_data["addr"])
         ]:
             peer_list_message = {
                 "type": "peer_list",
@@ -722,10 +741,10 @@ class Peer:
             logging.error(f"Error starting P2P server: {e}")
             await self.close_p2p_server()
 
-    async def update_last_seen(self, peer_info):
+    async def update_last_seen(self, server_id):
         async with self.rewrite_lock:
-            if peer_info in self.peers:
-                self.peers[peer_info] = int(time.time())
+            if server_id in self.active_peers:
+                self.active_peers[server_id]["lastseen"] = int(time.time())
                 self.peers_changed = True
                 await self.schedule_rewrite()
 
