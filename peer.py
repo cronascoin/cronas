@@ -273,7 +273,6 @@ class Peer:
         await self.schedule_rewrite()
         asyncio.create_task(self.send_heartbeat(writer))
 
-
     async def handle_disconnection(self, peer_info):
         if self.shutdown_flag:
             return
@@ -556,7 +555,7 @@ class Peer:
                     host, port = peer_info.split(':')
                     await self.connect_to_peer(host, int(port))
 
-                    if peer_info in self.active_peers:
+                    if any(peer_data["addr"] == peer_info for peer_data in self.active_peers.values()):
                         logging.info(f"Reconnected to {peer_info} successfully.")
                         break
                 except Exception as e:
@@ -565,7 +564,6 @@ class Peer:
             else:
                 logging.info(f"{peer_info} is already active or attempting to reconnect.")
                 break
-
 
     async def request_peer_list(self, writer, peer_info):
         current_time = time.time()
@@ -682,7 +680,6 @@ class Peer:
         send_time = time.time()  # Set send time
         await self.send_message(writer, hello_message)
         return send_time  # Return send time
-
 
     async def send_message(self, writer, message):
         message_data = json.dumps(message).encode('utf-8')
