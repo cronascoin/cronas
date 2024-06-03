@@ -170,7 +170,7 @@ class Peer:
                 # Wait for ack message to get server_id
                 ack_message = await self.receive_message(reader)
                 if ack_message.get("type") != "ack":
-                    raise ConnectionError("Did not receive ack message")
+                    raise Exception("Did not receive ack message")
                 server_id = ack_message.get("server_id")
 
                 if server_id in self.active_peers:
@@ -202,11 +202,6 @@ class Peer:
                 await self.schedule_rewrite()
                 return
 
-            except ConnectionError as e:
-                if self.debug:
-                    logging.error(f"Connection error while connecting to {host}:{port}: {e}")
-                self.connection_attempts[peer_info] += 1
-                await asyncio.sleep(self.connection_attempts[peer_info] * 5)
             except Exception as e:
                 if self.debug:
                     logging.error(f"Error connecting to {host}:{port}: {e}")
@@ -273,6 +268,7 @@ class Peer:
         await self.schedule_rewrite()
         asyncio.create_task(self.send_heartbeat(writer))
 
+
     async def handle_disconnection(self, peer_info):
         if self.shutdown_flag:
             return
@@ -286,7 +282,6 @@ class Peer:
         self.update_active_peers()
         self.peers_changed = True
         await self.schedule_rewrite()
-        await self.schedule_reconnect(peer_info)
 
     async def handle_hello_message(self, message, writer):
         addr = writer.get_extra_info('peername')
@@ -555,7 +550,7 @@ class Peer:
                     host, port = peer_info.split(':')
                     await self.connect_to_peer(host, int(port))
 
-                    if any(peer_data["addr"] == peer_info for peer_data in self.active_peers.values()):
+                    if peer_info in self.active_peers:
                         logging.info(f"Reconnected to {peer_info} successfully.")
                         break
                 except Exception as e:
