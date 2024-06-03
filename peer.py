@@ -170,7 +170,7 @@ class Peer:
                 # Wait for ack message to get server_id
                 ack_message = await self.receive_message(reader)
                 if ack_message.get("type") != "ack":
-                    raise Exception("Did not receive ack message")
+                    logging.error("Did not receive ack message")
                 server_id = ack_message.get("server_id")
 
                 if server_id in self.active_peers:
@@ -344,18 +344,23 @@ class Peer:
         self.connections[peer_info] = (reader, writer)
 
         try:
-            buffer = ''
+            buffer = b''
             while True:
                 data = await reader.read(1024)
                 if not data:
                     break
 
-                buffer += data.decode()
-                while '\n' in buffer:
-                    message, buffer = buffer.split('\n', 1)
-                    if message:
-                        message_obj = json.loads(message)
-                        await self.process_message(message_obj, writer)
+                buffer += data
+                while b'\n' in buffer:
+                    message, buffer = buffer.split(b'\n', 1)
+                    try:
+                        if message:
+                            message_obj = json.loads(message.decode('utf-8').strip())
+                            await self.process_message(message_obj, writer)
+                    except UnicodeDecodeError as e:
+                        logging.error(f"Failed to decode message from {peer_info}: {e}")
+                    except json.JSONDecodeError as e:
+                        logging.error(f"Failed to parse JSON message from {peer_info}: {e}")
 
         except asyncio.CancelledError:
             logging.info(f"Connection task with {peer_address} cancelled")
@@ -371,6 +376,7 @@ class Peer:
                 await writer.wait_closed()
             logging.info(f"Connection with {peer_address} closed.")
             await self.handle_disconnection(peer_info)
+
 
     async def handle_peer_list_message(self, message):
         new_peers = message.get("payload", [])
