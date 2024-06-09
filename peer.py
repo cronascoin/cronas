@@ -11,6 +11,7 @@ import aiofiles
 import random
 import ntplib
 import stun
+import requests
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
@@ -49,17 +50,36 @@ class Peer:
             client = ntplib.NTPClient()
             response = client.request('pool.ntp.org')
             ntp_time = datetime.datetime.fromtimestamp(response.tx_time)
-            system_time = datetime.datetime.now()
-            offset = (ntp_time - system_time).total_seconds()
-            logging.info(f"NTP time: {ntp_time}, System time: {system_time}, Offset: {offset}")
-
-            if abs(offset) >= 1:
-                logging.warning(f"Significant time discrepancy detected: {offset} seconds between system time and NTP time.")
-
-            return offset
+            return self._extracted_from_get_ntp_offset_6(
+                ntp_time,
+                'NTP time: ',
+                ' seconds between system time and NTP time.',
+            )
         except Exception as e:
             logging.error(f"Failed to get NTP time: {e}")
-            return 0
+
+            # Fallback to HTTP time
+            try:
+                response = requests.get('http://worldtimeapi.org/api/ip')
+                http_time = datetime.datetime.fromisoformat(response.json()['utc_datetime'])
+                return self._extracted_from_get_ntp_offset_6(
+                    http_time,
+                    'HTTP time: ',
+                    ' seconds between system time and HTTP time.',
+                )
+            except Exception as http_e:
+                logging.error(f"Failed to get HTTP time: {http_e}")
+                return 0
+
+    def _extracted_from_get_ntp_offset_6(self, arg0, arg1, arg2):
+        system_time = datetime.datetime.now()
+        offset = (arg0 - system_time).total_seconds()
+        logging.info(f"{arg1}{arg0}, System time: {system_time}, Offset: {offset}")
+
+        if abs(offset) >= 1:
+            logging.warning(f"Significant time discrepancy detected: {offset}{arg2}")
+
+        return offset
 
     def get_stun_info(self):
         try:
