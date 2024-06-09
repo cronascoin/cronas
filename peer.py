@@ -14,32 +14,6 @@ import stun
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
-def get_stun_info():
-    try:
-        nat_type, external_ip, external_port = stun.get_ip_info(stun_host='stun.l.google.com', stun_port=19302)
-        logging.info(f"NAT Type: {nat_type}, External IP: {external_ip}, External Port: {external_port}")
-        return external_ip, external_port
-    except Exception as e:
-        logging.error(f"Failed to get IP info via STUN: {e}")
-        return None, None
-
-def get_out_ip():
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(('8.8.8.8', 80))
-            ip = s.getsockname()[0]
-        logging.info(f"External IP via socket: {ip}")
-        return ip
-    except Exception as e:
-        logging.error(f"Failed to detect external IP address via socket: {e}")
-        return None
-
-def get_external_ip():
-    external_ip, external_port = get_stun_info()
-    if external_ip:
-        return external_ip, external_port
-    external_ip = get_out_ip()
-    return external_ip, None
 
 class Peer:
     def __init__(self, host, p2p_port, server_id, version, max_peers=10, config=None):
@@ -48,7 +22,7 @@ class Peer:
         self.p2p_port = p2p_port
         self.peers = {}
         self.active_peers = {}
-        self.external_ip, self.external_p2p_port = get_external_ip()
+        self.external_ip, self.external_p2p_port = self.get_external_ip()
         self.hello_seq = 0
         self.version = version
         self.file_lock = asyncio.Lock()
@@ -86,6 +60,33 @@ class Peer:
         except Exception as e:
             logging.error(f"Failed to get NTP time: {e}")
             return 0
+
+    def get_stun_info(self):
+        try:
+            nat_type, external_ip, external_port = stun.get_ip_info(stun_host='stun.l.google.com', stun_port=19302)
+            logging.info(f"External IP: {external_ip}")
+            return external_ip, external_port
+        except Exception as e:
+            logging.error(f"Failed to get IP info via STUN: {e}")
+            return None, None
+
+    def get_out_ip(self):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(('8.8.8.8', 80))
+                ip = s.getsockname()[0]
+            logging.info(f"External IP via socket: {ip}")
+            return ip
+        except Exception as e:
+            logging.error(f"Failed to detect external IP address via socket: {e}")
+            return None
+
+    def get_external_ip(self):
+        external_ip, external_port = self.get_stun_info()
+        if external_ip:
+            return external_ip, external_port
+        external_ip = self.get_out_ip()
+        return external_ip, None
 
     def is_private_ip(self, ip):
         return ipaddress.ip_address(ip).is_private
@@ -268,7 +269,7 @@ class Peer:
             return
 
         for server_id, peer_data in self.active_peers.items():
-            if peer_data["addr"] == peer_info:
+            if peer_data["addr"].split(':')[0] == peer_info.split(':')[0]:  # Match only IP address
                 del self.active_peers[server_id]
                 logging.info(f"Removed {peer_info} from active peers due to disconnection or error.")
                 break
@@ -543,30 +544,26 @@ class Peer:
             # Extract the IP address from peer_info
             ip_address = peer_info.split(':')[0]
 
-            # Extract IP addresses from active peers and peers connecting
-            active_ip_addresses = {p.split(':')[0] for p in self.active_peers}
-            connecting_ip_addresses = {p.split(':')[0] for p in self.peers_connecting}
-
-            # Check if the IP address is not in the active peers or peers connecting
-            if ip_address not in active_ip_addresses and ip_address not in connecting_ip_addresses:
-                try:
-                    jitter = random.uniform(0.8, 1.2)
-                    backoff_time = retry_intervals[attempt] * jitter
-                    logging.info(f"Scheduling reconnection attempt for {peer_info} in {backoff_time:.2f} seconds.")
-                    await asyncio.sleep(backoff_time)
-
-                    host, port = peer_info.split(':')
-                    await self.connect_to_peer(host, int(port))
-
-                    if ip_address in {p.split(':')[0] for p in self.active_peers}:
-                        logging.info(f"Reconnected to {peer_info} successfully.")
-                        break
-                except Exception as e:
-                    logging.error(f"Reconnection attempt {attempt} to {peer_info} failed: {e}")
-                    attempt += 1
-            else:
-                logging.info(f"{peer_info} is already active or attempting to reconnect.")
+            # Check if the IP address is already in active_peers
+            if any(ip_address == peer_data["addr"].split(':')[0] for peer_data in self.active_peers.values()):
+                logging.info(f"{ip_address} is already active. Skipping reconnection attempt.")
                 break
+
+            try:
+                jitter = random.uniform(0.8, 1.2)
+                backoff_time = retry_intervals[attempt] * jitter
+                logging.info(f"Scheduling reconnection attempt for {peer_info} in {backoff_time:.2f} seconds.")
+                await asyncio.sleep(backoff_time)
+
+                host, port = peer_info.split(':')
+                await self.connect_to_peer(host, int(port))
+
+                if any(ip_address == peer_data["addr"].split(':')[0] for peer_data in self.active_peers.values()):
+                    logging.info(f"Reconnected to {peer_info} successfully.")
+                    break
+            except Exception as e:
+                logging.error(f"Reconnection attempt {attempt} to {peer_info} failed: {e}")
+                attempt += 1
 
     async def request_peer_list(self, writer, peer_info):
         current_time = time.time()
