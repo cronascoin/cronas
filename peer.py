@@ -169,7 +169,8 @@ class Peer:
 
     async def connect_to_peer(self, host, port, max_retries=5):
         peer_info = f"{host}:{port}"
-
+        addr_bind = self.detect_ip_address()
+        
         if peer_info not in self.connection_attempts:
             self.connection_attempts[peer_info] = 0
 
@@ -196,12 +197,12 @@ class Peer:
 
                 receive_time = time.time()  # Calculate receive time
                 ping = receive_time - send_time  # Calculate ping time
-
+                
                 self.connections[peer_info] = (reader, writer)
                 self.active_peers[server_id] = {
                     'addr': peer_info,
                     'addrlocal': f"{self.external_ip}:{local_port}",
-                    'addrbind': f"{self.external_ip}:{local_port}",
+                    'addrbind': f"{addr_bind}:{local_port}",
                     'server_id': server_id,
                     'version': ack_message.get("version", "unknown"),
                     'lastseen': int(time.time()),
