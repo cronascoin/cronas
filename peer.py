@@ -173,12 +173,6 @@ class Peer:
                     logging.error("Did not receive ack message")
                 server_id = ack_message.get("server_id")
 
-                if server_id in self.active_peers:
-                    logging.info(f"Duplicate connection detected for server_id {server_id}. Closing new connection.")
-                    writer.close()
-                    await writer.wait_closed()
-                    return
-
                 receive_time = time.time()  # Calculate receive time
                 ping = receive_time - send_time  # Calculate ping time
 
@@ -380,7 +374,7 @@ class Peer:
 
     async def handle_peer_list_message(self, message):
         new_peers = message.get("payload", [])
-        logging.info("Processing new peer list...")
+        logging.info(f"Processing new peer list {new_peers}")
 
         valid_new_peers = {
             peer_info: self.peers.get(peer_info, 0) for peer_info in new_peers
@@ -450,7 +444,7 @@ class Peer:
                 message = json.loads(data_buffer.decode().strip())
                 await self.process_message(message, writer)
         except asyncio.IncompleteReadError:
-            logging.info("Incomplete read error, attempting to reconnect...")
+            logging.info(f"Incomplete read error {peer_info}")
             await self.handle_disconnection(peer_info)
             asyncio.create_task(self.reconnect_to_peer(host, int(port)))
         except ConnectionResetError as e:
@@ -546,7 +540,15 @@ class Peer:
                 logging.info(f"Shutdown in progress, cancelling reconnection attempts for {peer_info}.")
                 return
 
-            if peer_info not in self.active_peers and peer_info not in self.peers_connecting:
+            # Extract the IP address from peer_info
+            ip_address = peer_info.split(':')[0]
+
+            # Extract IP addresses from active peers and peers connecting
+            active_ip_addresses = {p.split(':')[0] for p in self.active_peers}
+            connecting_ip_addresses = {p.split(':')[0] for p in self.peers_connecting}
+
+            # Check if the IP address is not in the active peers or peers connecting
+            if ip_address not in active_ip_addresses and ip_address not in connecting_ip_addresses:
                 try:
                     jitter = random.uniform(0.8, 1.2)
                     backoff_time = retry_intervals[attempt] * jitter
@@ -556,7 +558,7 @@ class Peer:
                     host, port = peer_info.split(':')
                     await self.connect_to_peer(host, int(port))
 
-                    if peer_info in self.active_peers:
+                    if ip_address in {p.split(':')[0] for p in self.active_peers}:
                         logging.info(f"Reconnected to {peer_info} successfully.")
                         break
                 except Exception as e:

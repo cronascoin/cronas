@@ -171,7 +171,6 @@ async def main():
     max_peers = int(config.get('maxpeers', 10))
 
     peer = Peer('0.0.0.0', p2p_port, server_id, version, max_peers, config=config)
-    await peer.load_peers()  # Load peers only once
 
     rpc_server = RPCServer(peer, '127.0.0.1', rpc_port, rpc_password)
 
