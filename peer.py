@@ -12,6 +12,8 @@ import random
 import ntplib
 import stun
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
@@ -23,7 +25,6 @@ class Peer:
         self.p2p_port = p2p_port
         self.peers = {}
         self.active_peers = {}
-        self.external_ip, self.external_p2p_port = self.get_external_ip()
         self.hello_seq = 0
         self.version = version
         self.file_lock = asyncio.Lock()
@@ -43,33 +44,72 @@ class Peer:
         self.p2p_server = None
         self.last_peer_list_request = {}
         self.start_time = datetime.datetime.now()
+        self.internet_connected = self.is_connected_to_internet()
+        self.external_ip, self.external_p2p_port = self.get_external_ip()
         self.ntp_offset = self.get_ntp_offset()
+        asyncio.create_task(self.periodic_internet_check())
+
+    def is_connected_to_internet(self, timeout=3):
+        try:
+            requests.get('https://www.google.com', timeout=timeout)
+            return True
+        except requests.ConnectionError:
+            return False
+
+    async def periodic_internet_check(self):
+        while not self.shutdown_flag:
+            previous_status = self.internet_connected
+            self.internet_connected = self.is_connected_to_internet()
+            if self.internet_connected and not previous_status:
+                logging.info("Internet connection re-established. Attempting to reconnect to peers...")
+                await self.connect_to_known_peers(immediate=True)
+            elif not self.internet_connected and previous_status:
+                logging.warning("Internet connection lost.")
+            await asyncio.sleep(60)  # Check every minute
 
     def get_ntp_offset(self):
-        try:
-            client = ntplib.NTPClient()
-            response = client.request('pool.ntp.org')
-            ntp_time = datetime.datetime.fromtimestamp(response.tx_time)
-            return self._extracted_from_get_ntp_offset_6(
-                ntp_time,
-                'NTP time: ',
-                ' seconds between system time and NTP time.',
-            )
-        except Exception as e:
-            logging.error(f"Failed to get NTP time: {e}")
+        retries = 3
+        for _ in range(retries):
+            if self.internet_connected:
+                try:
+                    client = ntplib.NTPClient()
+                    response = client.request('pool.ntp.org')
+                    ntp_time = datetime.datetime.fromtimestamp(response.tx_time)
+                    return self._extracted_from_get_ntp_offset_6(
+                        ntp_time,
+                        'NTP time: ',
+                        ' seconds between system time and NTP time.',
+                    )
+                except Exception as e:
+                    logging.error(f"Failed to get NTP time: {e}")
+                    time.sleep(1)
+            else:
+                logging.warning("No internet connection. Cannot retrieve NTP time.")
 
-            # Fallback to HTTP time
+        # Fallback to HTTP time
+        if self.internet_connected:
             try:
-                response = requests.get('http://worldtimeapi.org/api/ip')
-                http_time = datetime.datetime.fromisoformat(response.json()['utc_datetime'])
-                return self._extracted_from_get_ntp_offset_6(
-                    http_time,
-                    'HTTP time: ',
-                    ' seconds between system time and HTTP time.',
-                )
+                return self._extracted_from_get_ntp_offset_23()
             except Exception as http_e:
                 logging.error(f"Failed to get HTTP time: {http_e}")
-                return 0
+        else:
+            logging.warning("No internet connection. Cannot retrieve HTTP time.")
+
+        return 0
+
+    # TODO Rename this here and in `get_ntp_offset`
+    def _extracted_from_get_ntp_offset_23(self):
+        session = requests.Session()
+        retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+        adapter = HTTPAdapter(max_retries=retry)
+        session.mount('http://', adapter)
+        response = session.get('http://worldtimeapi.org/api/ip')
+        http_time = datetime.datetime.fromisoformat(response.json()['utc_datetime'])
+        return self._extracted_from_get_ntp_offset_6(
+            http_time,
+            'HTTP time: ',
+            ' seconds between system time and HTTP time.',
+        )
 
     def _extracted_from_get_ntp_offset_6(self, arg0, arg1, arg2):
         system_time = datetime.datetime.now()
@@ -82,6 +122,9 @@ class Peer:
         return offset
 
     def get_stun_info(self):
+        if not self.internet_connected:
+            logging.warning("No internet connection. Cannot retrieve STUN info.")
+            return None, None
         try:
             nat_type, external_ip, external_port = stun.get_ip_info(stun_host='stun.l.google.com', stun_port=19302)
             logging.info(f"External IP: {external_ip}")
@@ -102,6 +145,10 @@ class Peer:
             return None
 
     def get_external_ip(self):
+        if not self.internet_connected:
+            logging.warning("No internet connection. Cannot retrieve external IP.")
+            return None, None
+
         external_ip, external_port = self.get_stun_info()
         if external_ip:
             return external_ip, external_port
@@ -130,7 +177,11 @@ class Peer:
             await self.connect_to_known_peers()
             await asyncio.sleep(60)
 
-    async def connect_to_known_peers(self):
+    async def connect_to_known_peers(self, immediate=False):
+        if not self.internet_connected:
+            logging.warning("No internet connection. Cannot connect to known peers.")
+            return
+
         available_peers = [
             peer for peer in self.peers if peer not in self.active_peers and peer not in self.peers_connecting
         ]
@@ -142,7 +193,7 @@ class Peer:
 
         self.peers_connecting.update(peers_to_connect)
 
-        tasks = [asyncio.create_task(self.connect_to_peer(host, int(port)))
+        tasks = [asyncio.create_task(self.connect_to_peer(host, int(port), immediate=immediate))
                  for host, port in (peer.split(':') for peer in peers_to_connect)]
         try:
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -151,6 +202,10 @@ class Peer:
         self.update_active_peers()
 
     async def connect_to_new_peers(self, new_peers):
+        if not self.internet_connected:
+            logging.warning("No internet connection. Cannot connect to new peers.")
+            return
+
         for peer_info in new_peers:
             try:
                 host, port = peer_info.split(':')
@@ -167,7 +222,11 @@ class Peer:
             except ValueError:
                 logging.warning(f"Invalid peer address format: {peer_info}")
 
-    async def connect_to_peer(self, host, port, max_retries=5):
+    async def connect_to_peer(self, host, port, max_retries=5, immediate=False):
+        if not self.internet_connected:
+            logging.warning(f"No internet connection. Cannot connect to peer {host}:{port}.")
+            return
+
         peer_info = f"{host}:{port}"
         addr_bind = self.detect_ip_address()
         
@@ -210,6 +269,8 @@ class Peer:
                     'send_time': send_time,
                 }
 
+                logging.info(f"Peer {peer_info} reconnected.")
+
                 asyncio.create_task(self.listen_for_messages(reader, writer))
                 asyncio.create_task(self.send_heartbeat(writer, server_id))
 
@@ -222,7 +283,10 @@ class Peer:
                 if self.debug:
                     logging.error(f"Error connecting to {host}:{port}: {e}")
                 self.connection_attempts[peer_info] += 1
-                await asyncio.sleep(self.connection_attempts[peer_info] * 5)
+                if immediate:
+                    await asyncio.sleep(1)  # Retry immediately
+                else:
+                    await asyncio.sleep(self.connection_attempts[peer_info] * 5)
 
         if peer_info in self.connection_attempts:
             logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
@@ -468,11 +532,11 @@ class Peer:
         except asyncio.IncompleteReadError:
             logging.info(f"Incomplete read error {peer_info}")
             await self.handle_disconnection(peer_info)
-            asyncio.create_task(self.reconnect_to_peer(host, int(port)))
+            asyncio.create_task(self.reconnect_to_peer(host, int(port), immediate=True))
         except ConnectionResetError as e:
             logging.error(f"Connection reset error with {peer_info}: {e}")
             await self.handle_disconnection(peer_info)
-            asyncio.create_task(self.reconnect_to_peer(host, int(port)))
+            asyncio.create_task(self.reconnect_to_peer(host, int(port), immediate=True))
         except Exception as e:
             logging.error(f"Error during communication with {peer_info}: {e}")
             await self.handle_disconnection(peer_info)
@@ -544,14 +608,14 @@ class Peer:
         elif message_type == "peer_list":
             await self.handle_peer_list_message(message)
 
-    async def reconnect_to_peer(self, host, port):
+    async def reconnect_to_peer(self, host, port, immediate=False):
         peer_info = f"{host}:{port}"
-        await self._attempt_reconnect(peer_info)
+        await self._attempt_reconnect(peer_info, immediate=immediate)
 
-    async def schedule_reconnect(self, peer_info):
-        await self._attempt_reconnect(peer_info)
+    async def schedule_reconnect(self, peer_info, immediate=False):
+        await self._attempt_reconnect(peer_info, immediate=immediate)
 
-    async def _attempt_reconnect(self, peer_info):
+    async def _attempt_reconnect(self, peer_info, immediate=False):
         logging.info(f"Attempting to reconnect to {peer_info}")
 
         retry_intervals = [60, 3600, 86400, 2592000]
@@ -573,11 +637,13 @@ class Peer:
             try:
                 jitter = random.uniform(0.8, 1.2)
                 backoff_time = retry_intervals[attempt] * jitter
+                if immediate:
+                    backoff_time = 1  # Immediate retry
                 logging.info(f"Scheduling reconnection attempt for {peer_info} in {backoff_time:.2f} seconds.")
                 await asyncio.sleep(backoff_time)
 
                 host, port = peer_info.split(':')
-                await self.connect_to_peer(host, int(port))
+                await self.connect_to_peer(host, int(port), immediate=immediate)
 
                 if any(ip_address == peer_data["addr"].split(':')[0] for peer_data in self.active_peers.values()):
                     logging.info(f"Reconnected to {peer_info} successfully.")
@@ -738,10 +804,18 @@ class Peer:
             await self.load_peers()
             await self.start_p2p_server()
             asyncio.create_task(self.connect_and_maintain())
+            asyncio.create_task(self.check_connections())  # Added task for checking connections every 10 minutes
         finally:
             self.shutdown_flag = True
             await self.cleanup_and_rewrite_peers()
             await self.close_p2p_server()
+
+    async def check_connections(self):
+        while not self.shutdown_flag:
+            if not self.active_peers:
+                logging.info("No active peers. Attempting to connect...")
+                await self.connect_to_known_peers(immediate=True)
+            await asyncio.sleep(600)  # Check every 10 minutes
 
     async def start_p2p_server(self):
         try:
@@ -751,7 +825,7 @@ class Peer:
             )
             self.p2p_server = server
             logging.info(f"P2P server version {self.version} with ID {self.server_id} listening on {self.host}:{self.p2p_port}")
-            await self.connect_to_known_peers()
+            await self.connect_to_known_peers(immediate=True)
             asyncio.create_task(self.schedule_periodic_peer_save())
 
             async with server:
