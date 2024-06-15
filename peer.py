@@ -14,19 +14,25 @@ import stun
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from typing import Tuple, Dict, Optional, List
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
-
 class Peer:
-    def __init__(self, host, p2p_port, server_id, version, max_peers=10, config=None):
+    FILE_WRITE_DELAY = 10
+    CONNECTION_RETRY_INTERVALS = [60, 3600, 86400, 2592000]
+    PEER_LIST_COOLDOWN = 300
+
+    def __init__(self, host: str, p2p_port: int, server_id: str, version: str, max_peers: int = 10, config: Optional[Dict] = None):
         self.server_id = server_id
         self.host = host
         self.p2p_port = p2p_port
+        self.version = version
+        self.max_peers = max_peers
+        self.config = config or {}
         self.peers = {}
         self.active_peers = {}
         self.hello_seq = 0
-        self.version = version
         self.file_lock = asyncio.Lock()
         self.peers_changed = False
         self.connections = {}
@@ -34,13 +40,10 @@ class Peer:
         self.heartbeat_tasks = {}
         self.file_write_scheduled = False
         self.pending_file_write = False
-        self.file_write_delay = 10
-        self.max_peers = max_peers
         self.rewrite_lock = asyncio.Lock()
         self.connection_attempts = {}
         self.peers_connecting = set()
-        self.config = config
-        self.debug = config.get('debug', 'false').lower() == 'true'
+        self.debug = self.config.get('debug', 'false').lower() == 'true'
         self.p2p_server = None
         self.last_peer_list_request = {}
         self.start_time = datetime.datetime.now()
@@ -49,25 +52,30 @@ class Peer:
         self.ntp_offset = self.get_ntp_offset()
         asyncio.create_task(self.periodic_internet_check())
 
-    def is_connected_to_internet(self, timeout=3):
+    def is_connected_to_internet(self, timeout: int = 3) -> bool:
         try:
             requests.get('https://www.google.com', timeout=timeout)
             return True
-        except requests.ConnectionError:
+        except (requests.ConnectionError, requests.ReadTimeout) as e:
+            logging.warning(f"Internet connection check failed: {e}")
             return False
+
 
     async def periodic_internet_check(self):
         while not self.shutdown_flag:
             previous_status = self.internet_connected
-            self.internet_connected = self.is_connected_to_internet()
-            if self.internet_connected and not previous_status:
-                logging.info("Internet connection re-established. Attempting to reconnect to peers...")
-                await self.connect_to_known_peers(immediate=True)
-            elif not self.internet_connected and previous_status:
-                logging.warning("Internet connection lost.")
-            await asyncio.sleep(60)  # Check every minute
+            try:
+                self.internet_connected = self.is_connected_to_internet()
+                if self.internet_connected and not previous_status:
+                    logging.info("Internet connection re-established. Attempting to reconnect to peers...")
+                    await self.connect_to_known_peers(immediate=True)
+                elif not self.internet_connected and previous_status:
+                    logging.warning("Internet connection lost.")
+            except Exception as e:
+                logging.error(f"Error during periodic internet check: {e}")
+            await asyncio.sleep(60)
 
-    def get_ntp_offset(self):
+    def get_ntp_offset(self) -> float:
         retries = 3
         for _ in range(retries):
             if self.internet_connected:
@@ -75,21 +83,16 @@ class Peer:
                     client = ntplib.NTPClient()
                     response = client.request('pool.ntp.org')
                     ntp_time = datetime.datetime.fromtimestamp(response.tx_time)
-                    return self._extracted_from_get_ntp_offset_6(
-                        ntp_time,
-                        'NTP time: ',
-                        ' seconds between system time and NTP time.',
-                    )
+                    return self._calculate_offset(ntp_time, 'NTP time: ', ' seconds between system time and NTP time.')
                 except Exception as e:
                     logging.error(f"Failed to get NTP time: {e}")
                     time.sleep(1)
             else:
                 logging.warning("No internet connection. Cannot retrieve NTP time.")
 
-        # Fallback to HTTP time
         if self.internet_connected:
             try:
-                return self._extracted_from_get_ntp_offset_23()
+                return self._get_http_time_offset()
             except Exception as http_e:
                 logging.error(f"Failed to get HTTP time: {http_e}")
         else:
@@ -97,31 +100,26 @@ class Peer:
 
         return 0
 
-    # TODO Rename this here and in `get_ntp_offset`
-    def _extracted_from_get_ntp_offset_23(self):
+    def _calculate_offset(self, remote_time: datetime.datetime, time_label: str, discrepancy_label: str) -> float:
+        system_time = datetime.datetime.now()
+        offset = (remote_time - system_time).total_seconds()
+        logging.info(f"{time_label}{remote_time}, System time: {system_time}, Offset: {offset}")
+
+        if abs(offset) >= 1:
+            logging.warning(f"Significant time discrepancy detected: {offset}{discrepancy_label}")
+
+        return offset
+
+    def _get_http_time_offset(self) -> float:
         session = requests.Session()
         retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
         adapter = HTTPAdapter(max_retries=retry)
         session.mount('http://', adapter)
         response = session.get('http://worldtimeapi.org/api/ip')
         http_time = datetime.datetime.fromisoformat(response.json()['utc_datetime'])
-        return self._extracted_from_get_ntp_offset_6(
-            http_time,
-            'HTTP time: ',
-            ' seconds between system time and HTTP time.',
-        )
+        return self._calculate_offset(http_time, 'HTTP time: ', ' seconds between system time and HTTP time.')
 
-    def _extracted_from_get_ntp_offset_6(self, arg0, arg1, arg2):
-        system_time = datetime.datetime.now()
-        offset = (arg0 - system_time).total_seconds()
-        logging.info(f"{arg1}{arg0}, System time: {system_time}, Offset: {offset}")
-
-        if abs(offset) >= 1:
-            logging.warning(f"Significant time discrepancy detected: {offset}{arg2}")
-
-        return offset
-
-    def get_stun_info(self):
+    def get_stun_info(self) -> Tuple[Optional[str], Optional[int]]:
         if not self.internet_connected:
             logging.warning("No internet connection. Cannot retrieve STUN info.")
             return None, None
@@ -133,7 +131,7 @@ class Peer:
             logging.error(f"Failed to get IP info via STUN: {e}")
             return None, None
 
-    def get_out_ip(self):
+    def get_out_ip(self) -> Optional[str]:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.connect(('8.8.8.8', 80))
@@ -144,7 +142,7 @@ class Peer:
             logging.error(f"Failed to detect external IP address via socket: {e}")
             return None
 
-    def get_external_ip(self):
+    def get_external_ip(self) -> Tuple[Optional[str], Optional[int]]:
         if not self.internet_connected:
             logging.warning("No internet connection. Cannot retrieve external IP.")
             return None, None
@@ -155,10 +153,10 @@ class Peer:
         external_ip = self.get_out_ip()
         return external_ip, None
 
-    def is_private_ip(self, ip):
+    def is_private_ip(self, ip: str) -> bool:
         return ipaddress.ip_address(ip).is_private
 
-    async def close_connection(self, host, port):
+    async def close_connection(self, host: str, port: int):
         if (host, port) in self.connections:
             _, writer = self.connections.pop((host, port))
             if writer and not writer.is_closing():
@@ -177,7 +175,7 @@ class Peer:
             await self.connect_to_known_peers()
             await asyncio.sleep(60)
 
-    async def connect_to_known_peers(self, immediate=False):
+    async def connect_to_known_peers(self, immediate: bool = False):
         if not self.internet_connected:
             logging.warning("No internet connection. Cannot connect to known peers.")
             return
@@ -201,7 +199,95 @@ class Peer:
             self.peers_connecting.difference_update(peers_to_connect)
         self.update_active_peers()
 
-    async def connect_to_new_peers(self, new_peers):
+    async def connect_to_peer(self, host: str, port: int, max_retries: int = 5, immediate: bool = False):
+        if not self.internet_connected:
+            logging.warning(f"No internet connection. Cannot connect to peer {host}:{port}.")
+            return
+
+        peer_info = f"{host}:{port}"
+        addr_bind = self.detect_ip_address()
+
+        if peer_info not in self.connection_attempts:
+            self.connection_attempts[peer_info] = 0
+
+        while self.should_attempt_connection(peer_info, max_retries):
+            if self.shutdown_flag:
+                logging.info(f"Shutdown in progress, cancelling connection attempts to {peer_info}.")
+                return
+
+            if self.reached_max_peers():
+                logging.info(f"Maximum number of peers ({self.max_peers}) already connected. Skipping connection to {peer_info}.")
+                return
+
+            try:
+                reader, writer = await self.establish_connection(host, port)
+                send_time = await self.perform_handshake(writer)
+                server_id, ack_message = await self.receive_ack_message(reader)
+                ping = self.calculate_ping(send_time)
+
+                self.store_peer_info(peer_info, reader, writer, server_id, ack_message, ping, send_time, addr_bind)
+                asyncio.create_task(self.listen_for_messages(reader, writer))
+                asyncio.create_task(self.send_heartbeat(writer, server_id))
+
+                await self.schedule_peer_rewrite(peer_info)
+                return
+
+            except Exception as e:
+                logging.error(f"Error connecting to {host}:{port}: {e}")
+                self.connection_attempts[peer_info] += 1
+                await self.retry_connection(peer_info, immediate)
+
+        logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
+        self.connection_attempts.pop(peer_info, None)
+
+    def should_attempt_connection(self, peer_info: str, max_retries: int) -> bool:
+        return peer_info in self.connection_attempts and self.connection_attempts[peer_info] < max_retries
+
+    def reached_max_peers(self) -> bool:
+        return len(self.active_peers) >= self.max_peers
+
+    async def establish_connection(self, host: str, port: int) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        return await asyncio.open_connection(host, port)
+
+    async def perform_handshake(self, writer: asyncio.StreamWriter) -> float:
+        return await self.send_hello_message(writer)
+
+    async def receive_ack_message(self, reader: asyncio.StreamReader) -> Tuple[str, Dict]:
+        ack_message = await self.receive_message(reader)
+        if ack_message.get("type") != "ack":
+            logging.error("Did not receive ack message")
+        server_id = ack_message.get("server_id")
+        return server_id, ack_message
+
+    def calculate_ping(self, send_time: float) -> float:
+        receive_time = time.time()
+        return receive_time - send_time
+
+    def store_peer_info(self, peer_info: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, server_id: str, ack_message: Dict, ping: float, send_time: float, addr_bind: str):
+        self.connections[peer_info] = (reader, writer)
+        self.active_peers[server_id] = {
+            'addr': peer_info,
+            'addrlocal': f"{self.external_ip}:{writer.get_extra_info('sockname')[1]}",
+            'addrbind': f"{addr_bind}:{writer.get_extra_info('sockname')[1]}",
+            'server_id': server_id,
+            'version': ack_message.get("version", "unknown"),
+            'lastseen': int(time.time()),
+            'ping': round(ping, 3),
+            'send_time': send_time,
+        }
+
+    async def retry_connection(self, peer_info: str, immediate: bool):
+        if immediate:
+            await asyncio.sleep(1)
+        else:
+            await asyncio.sleep(self.connection_attempts[peer_info] * 5)
+
+    async def schedule_peer_rewrite(self, peer_info: str):
+        self.peers[peer_info] = int(time.time())
+        self.peers_changed = True
+        await self.schedule_rewrite()
+
+    async def connect_to_new_peers(self, new_peers: List[str]):
         if not self.internet_connected:
             logging.warning("No internet connection. Cannot connect to new peers.")
             return
@@ -222,82 +308,11 @@ class Peer:
             except ValueError:
                 logging.warning(f"Invalid peer address format: {peer_info}")
 
-    async def connect_to_peer(self, host, port, max_retries=5, immediate=False):
-        if not self.internet_connected:
-            logging.warning(f"No internet connection. Cannot connect to peer {host}:{port}.")
-            return
-
-        peer_info = f"{host}:{port}"
-        addr_bind = self.detect_ip_address()
-        
-        if peer_info not in self.connection_attempts:
-            self.connection_attempts[peer_info] = 0
-
-        while peer_info in self.connection_attempts and self.connection_attempts[peer_info] < max_retries:
-            if self.shutdown_flag:
-                logging.info(f"Shutdown in progress, cancelling connection attempts to {peer_info}.")
-                return
-
-            if len(self.active_peers) >= self.max_peers:
-                logging.info(f"Maximum number of peers ({self.max_peers}) already connected. Skipping connection to {peer_info}.")
-                return
-
-            try:
-                reader, writer = await asyncio.open_connection(host, port)
-                local_addr, local_port = writer.get_extra_info('sockname')
-
-                send_time = await self.send_hello_message(writer)  # Get send time from hello message
-
-                # Wait for ack message to get server_id
-                ack_message = await self.receive_message(reader)
-                if ack_message.get("type") != "ack":
-                    logging.error("Did not receive ack message")
-                server_id = ack_message.get("server_id")
-
-                receive_time = time.time()  # Calculate receive time
-                ping = receive_time - send_time  # Calculate ping time
-                
-                self.connections[peer_info] = (reader, writer)
-                self.active_peers[server_id] = {
-                    'addr': peer_info,
-                    'addrlocal': f"{self.external_ip}:{local_port}",
-                    'addrbind': f"{addr_bind}:{local_port}",
-                    'server_id': server_id,
-                    'version': ack_message.get("version", "unknown"),
-                    'lastseen': int(time.time()),
-                    'ping': round(ping, 3),  # Store ping time
-                    'send_time': send_time,
-                }
-
-                logging.info(f"Peer {peer_info} reconnected.")
-
-                asyncio.create_task(self.listen_for_messages(reader, writer))
-                asyncio.create_task(self.send_heartbeat(writer, server_id))
-
-                self.peers[peer_info] = int(time.time())
-                self.peers_changed = True
-                await self.schedule_rewrite()
-                return
-
-            except Exception as e:
-                if self.debug:
-                    logging.error(f"Error connecting to {host}:{port}: {e}")
-                self.connection_attempts[peer_info] += 1
-                if immediate:
-                    await asyncio.sleep(1)  # Retry immediately
-                else:
-                    await asyncio.sleep(self.connection_attempts[peer_info] * 5)
-
-        if peer_info in self.connection_attempts:
-            logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
-            self.connection_attempts.pop(peer_info, None)
-            return
-
-    async def receive_message(self, reader):
+    async def receive_message(self, reader: asyncio.StreamReader) -> Dict:
         data = await reader.readuntil(separator=b'\n')
         return json.loads(data.decode())
 
-    def detect_ip_address(self):
+    def detect_ip_address(self) -> str:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.connect(('8.8.8.8', 80))
@@ -307,12 +322,12 @@ class Peer:
             logging.info(f"Failed to detect external IP address: {e}")
             return '127.0.0.1'
 
-    def get_uptime(self):
+    def get_uptime(self) -> float:
         current_time = datetime.datetime.now()
         uptime = current_time - self.start_time
         return uptime.total_seconds()
 
-    async def handle_ack_message(self, message, writer):
+    async def handle_ack_message(self, message: Dict, writer: asyncio.StreamWriter):
         addr = writer.get_extra_info('peername')
         peer_info = f"{addr[0]}:{addr[1]}"
         remote_version = message.get("version", "unknown")
@@ -348,13 +363,12 @@ class Peer:
         await self.schedule_rewrite()
         asyncio.create_task(self.send_heartbeat(writer))
 
-
-    async def handle_disconnection(self, peer_info):
+    async def handle_disconnection(self, peer_info: str):
         if self.shutdown_flag:
             return
 
         for server_id, peer_data in self.active_peers.items():
-            if peer_data["addr"].split(':')[0] == peer_info.split(':')[0]:  # Match only IP address
+            if peer_data["addr"].split(':')[0] == peer_info.split(':')[0]:
                 del self.active_peers[server_id]
                 logging.info(f"Removed {peer_info} from active peers due to disconnection or error.")
                 break
@@ -363,12 +377,12 @@ class Peer:
         self.peers_changed = True
         await self.schedule_rewrite()
 
-    async def handle_hello_message(self, message, writer):
+    async def handle_hello_message(self, message: Dict, writer: asyncio.StreamWriter):
         addr = writer.get_extra_info('peername')
 
         remote_server_id = message.get('server_id', 'unknown')
         remote_version = message.get('version', 'unknown')
-        if remote_timestamp := message.get('timestamp', None):
+        if remote_timestamp := message.get('timestamp'):
             local_time = time.time() + self.ntp_offset
             time_difference = abs(local_time - remote_timestamp)
             if time_difference >= 1:
@@ -380,15 +394,7 @@ class Peer:
         else:
             peer_info = f"{addr[0]}:{addr[1]}"
 
-        ack_message = {
-            "type": "ack",
-            "payload": "Handshake acknowledged",
-            "version": self.version,
-            "server_id": self.server_id,
-            "timestamp": time.time() + self.ntp_offset
-        }
-        writer.write(json.dumps(ack_message).encode() + b'\n')
-        await writer.drain()
+        await self.send_ack_message(writer, self.version, self.server_id)
         if self.debug:
             logging.info(f"Handshake acknowledged to {peer_info}")
 
@@ -411,7 +417,7 @@ class Peer:
         self.update_active_peers()
         asyncio.create_task(self.send_heartbeat(writer))
 
-    async def handle_peer_connection(self, reader, writer):
+    async def handle_peer_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         peer_address = writer.get_extra_info('peername')
         peer_info = f"{peer_address[0]}:{peer_address[1]}"
 
@@ -457,8 +463,7 @@ class Peer:
             logging.info(f"Connection with {peer_address} closed.")
             await self.handle_disconnection(peer_info)
 
-
-    async def handle_peer_list_message(self, message):
+    async def handle_peer_list_message(self, message: Dict):
         new_peers = message.get("payload", [])
         logging.info(f"Processing new peer list {new_peers}")
 
@@ -500,7 +505,7 @@ class Peer:
                 logging.warning(f"Invalid peer address format: {peer_info}")
         self.update_active_peers()
 
-    def is_valid_peer(self, peer_info):
+    def is_valid_peer(self, peer_info: str) -> bool:
         try:
             ip, port = peer_info.split(':')
             ipaddress.ip_address(ip)
@@ -515,7 +520,7 @@ class Peer:
             logging.error(f"Invalid peer address '{peer_info}': {e}")
             return False
 
-    async def listen_for_messages(self, reader, writer):
+    async def listen_for_messages(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         addr = writer.get_extra_info('peername')
         host, port = addr[0], addr[1]
         peer_info = f"{host}:{port}"
@@ -590,7 +595,7 @@ class Peer:
         self.peers_changed = True
         logging.debug("Peers data marked as changed.")
 
-    async def process_message(self, message, writer):
+    async def process_message(self, message: Dict, writer: asyncio.StreamWriter):
         addr = writer.get_extra_info('peername')
         peer_info = f"{addr[0]}:{addr[1]}"
         if self.debug:
@@ -608,35 +613,32 @@ class Peer:
         elif message_type == "peer_list":
             await self.handle_peer_list_message(message)
 
-    async def reconnect_to_peer(self, host, port, immediate=False):
+    async def reconnect_to_peer(self, host: str, port: int, immediate: bool = False):
         peer_info = f"{host}:{port}"
         await self._attempt_reconnect(peer_info, immediate=immediate)
 
-    async def schedule_reconnect(self, peer_info, immediate=False):
+    async def schedule_reconnect(self, peer_info: str, immediate: bool = False):
         await self._attempt_reconnect(peer_info, immediate=immediate)
 
-    async def _attempt_reconnect(self, peer_info, immediate=False):
+    async def _attempt_reconnect(self, peer_info: str, immediate: bool = False):
         logging.info(f"Attempting to reconnect to {peer_info}")
 
-        retry_intervals = [60, 3600, 86400, 2592000]
         attempt = 0
 
-        while attempt < len(retry_intervals):
+        while attempt < len(self.CONNECTION_RETRY_INTERVALS):
             if self.shutdown_flag:
                 logging.info(f"Shutdown in progress, cancelling reconnection attempts for {peer_info}.")
                 return
 
-            # Extract the IP address from peer_info
             ip_address = peer_info.split(':')[0]
 
-            # Check if the IP address is already in active_peers
             if any(ip_address == peer_data["addr"].split(':')[0] for peer_data in self.active_peers.values()):
                 logging.info(f"{ip_address} is already active. Skipping reconnection attempt.")
                 break
 
             try:
                 jitter = random.uniform(0.8, 1.2)
-                backoff_time = retry_intervals[attempt] * jitter
+                backoff_time = self.CONNECTION_RETRY_INTERVALS[attempt] * jitter
                 if immediate:
                     backoff_time = 1  # Immediate retry
                 logging.info(f"Scheduling reconnection attempt for {peer_info} in {backoff_time:.2f} seconds.")
@@ -652,13 +654,12 @@ class Peer:
                 logging.error(f"Reconnection attempt {attempt} to {peer_info} failed: {e}")
                 attempt += 1
 
-    async def request_peer_list(self, writer, peer_info):
+    async def request_peer_list(self, writer: asyncio.StreamWriter, peer_info: str):
         current_time = time.time()
         if peer_info in self.last_peer_list_request:
             last_request_time = self.last_peer_list_request[peer_info]
-            cooldown_period = 300
 
-            if current_time - last_request_time < cooldown_period:
+            if current_time - last_request_time < self.PEER_LIST_COOLDOWN:
                 logging.info(f"Skipping peer list request to {peer_info} (cooldown period not yet passed)")
                 return
 
@@ -672,7 +673,7 @@ class Peer:
         await writer.drain()
         logging.info(f"Request for peer list sent to {peer_info}.")
 
-    async def respond_to_heartbeat(self, writer, message):
+    async def respond_to_heartbeat(self, writer: asyncio.StreamWriter, message: Dict):
         peer_info = writer.get_extra_info('peername')
         peer_info_str = f"{peer_info[0]}:{peer_info[1]}"
 
@@ -711,7 +712,7 @@ class Peer:
             except Exception as e:
                 logging.error(f"Failed to rewrite peers.dat: {e}")
 
-    async def send_ack_message(self, writer, version, server_id):
+    async def send_ack_message(self, writer: asyncio.StreamWriter, version: str, server_id: str):
         ack_message = {
             "type": "ack",
             "version": version,
@@ -732,7 +733,7 @@ class Peer:
             self.file_write_scheduled = True
             asyncio.create_task(self._rewrite_after_delay())
 
-    async def send_heartbeat(self, writer, server_id=None):
+    async def send_heartbeat(self, writer: asyncio.StreamWriter, server_id: Optional[str] = None):
         await asyncio.sleep(60)
         try:
             while not writer.is_closing():
@@ -755,7 +756,7 @@ class Peer:
         except Exception as e:
             logging.error(f"Error sending heartbeat: {e}")
 
-    async def send_hello_message(self, writer):
+    async def send_hello_message(self, writer: asyncio.StreamWriter) -> float:
         hello_message = {
             'type': 'hello',
             'host': self.external_ip,
@@ -768,12 +769,12 @@ class Peer:
         await self.send_message(writer, hello_message)
         return send_time  # Return send time
 
-    async def send_message(self, writer, message):
+    async def send_message(self, writer: asyncio.StreamWriter, message: Dict):
         message_data = json.dumps(message).encode('utf-8')
         writer.write(message_data + b'\n')
         await writer.drain()
 
-    async def send_peer_list(self, writer):
+    async def send_peer_list(self, writer: asyncio.StreamWriter):
         logging.info("Attempting to send peer list...")
 
         if connecting_ports := [
@@ -804,7 +805,7 @@ class Peer:
             await self.load_peers()
             await self.start_p2p_server()
             asyncio.create_task(self.connect_and_maintain())
-            asyncio.create_task(self.check_connections())  # Added task for checking connections every 10 minutes
+            asyncio.create_task(self.check_connections())
         finally:
             self.shutdown_flag = True
             await self.cleanup_and_rewrite_peers()
@@ -815,7 +816,7 @@ class Peer:
             if not self.active_peers:
                 logging.info("No active peers. Attempting to connect...")
                 await self.connect_to_known_peers(immediate=True)
-            await asyncio.sleep(600)  # Check every 10 minutes
+            await asyncio.sleep(600)
 
     async def start_p2p_server(self):
         try:
@@ -841,7 +842,7 @@ class Peer:
             logging.error(f"Error starting P2P server: {e}")
             await self.close_p2p_server()
 
-    async def update_last_seen(self, server_id):
+    async def update_last_seen(self, server_id: str):
         async with self.rewrite_lock:
             if server_id in self.active_peers:
                 self.active_peers[server_id]["lastseen"] = int(time.time())
@@ -849,7 +850,7 @@ class Peer:
                 await self.schedule_rewrite()
 
     async def _rewrite_after_delay(self):
-        await asyncio.sleep(self.file_write_delay)
+        await asyncio.sleep(self.FILE_WRITE_DELAY)
         if self.peers_changed:
             async with self.file_lock:
                 try:
