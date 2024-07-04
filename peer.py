@@ -232,7 +232,7 @@ class Peer:
 
         peer_info = f"{host}:{port}"
         addr_bind = self.detect_ip_address()
-        
+
         if peer_info not in self.connection_attempts:
             self.connection_attempts[peer_info] = 0
 
@@ -246,55 +246,58 @@ class Peer:
                 return
 
             try:
-                reader, writer = await asyncio.open_connection(host, port)
-                local_addr, local_port = writer.get_extra_info('sockname')
-
-                send_time = await self.send_hello_message(writer)  # Get send time from hello message
-
-                # Wait for ack message to get server_id
-                ack_message = await self.receive_message(reader)
-                if ack_message.get("type") != "ack":
-                    logging.error("Did not receive ack message")
-                server_id = ack_message.get("server_id")
-
-                receive_time = time.time()  # Calculate receive time
-                ping = receive_time - send_time  # Calculate ping time
-                
-                self.connections[peer_info] = (reader, writer)
-                self.active_peers[server_id] = {
-                    'addr': peer_info,
-                    'addrlocal': f"{self.external_ip}:{local_port}",
-                    'addrbind': f"{addr_bind}:{local_port}",
-                    'server_id': server_id,
-                    'version': ack_message.get("version", "unknown"),
-                    'lastseen': int(time.time()),
-                    'ping': round(ping, 3),  # Store ping time
-                    'send_time': send_time,
-                }
-
-                logging.info(f"Peer {peer_info} reconnected.")
-
-                asyncio.create_task(self.listen_for_messages(reader, writer))
-                asyncio.create_task(self.send_heartbeat(writer, server_id))
-
-                self.peers[peer_info] = int(time.time())
-                self.peers_changed = True
-                await self.schedule_rewrite()
+                reader, writer = await self._attempt_connection(host, port)
+                await self._establish_connection(peer_info, reader, writer, addr_bind)
                 return
-
             except Exception as e:
-                if self.debug:
-                    logging.error(f"Error connecting to {host}:{port}: {e}")
-                self.connection_attempts[peer_info] += 1
+                self._handle_connection_error(e, peer_info, immediate)
                 if immediate:
                     await asyncio.sleep(1)  # Retry immediately
                 else:
                     await asyncio.sleep(self.connection_attempts[peer_info] * 5)
 
-        if peer_info in self.connection_attempts:
-            logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
-            self.connection_attempts.pop(peer_info, None)
-            return
+        logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
+        self.connection_attempts.pop(peer_info, None)
+
+    async def _attempt_connection(self, host, port):
+        return await asyncio.open_connection(host, port)
+
+    async def _establish_connection(self, peer_info, reader, writer, addr_bind):
+        local_addr, local_port = writer.get_extra_info('sockname')
+        send_time = await self.send_hello_message(writer)
+        ack_message = await self.receive_message(reader)
+        
+        if ack_message.get("type") != "ack":
+            raise ConnectionError("Did not receive ack message")
+
+        server_id = ack_message.get("server_id")
+        receive_time = time.time()
+        ping = receive_time - send_time
+
+        self.connections[peer_info] = (reader, writer)
+        self.active_peers[server_id] = {
+            'addr': peer_info,
+            'addrlocal': f"{self.external_ip}:{local_port}",
+            'addrbind': f"{addr_bind}:{local_port}",
+            'server_id': server_id,
+            'version': ack_message.get("version", "unknown"),
+            'lastseen': int(time.time()),
+            'ping': round(ping, 3),
+            'send_time': send_time,
+        }
+
+        logging.info(f"Peer {peer_info} connected.")
+        asyncio.create_task(self.listen_for_messages(reader, writer))
+        asyncio.create_task(self.send_heartbeat(writer, server_id))
+        self.peers[peer_info] = int(time.time())
+        self.peers_changed = True
+        await self.schedule_rewrite()
+
+    def _handle_connection_error(self, e, peer_info, immediate):
+        if self.debug:
+            logging.error(f"Error connecting to {peer_info}: {e}")
+        self.connection_attempts[peer_info] += 1
+
 
     async def receive_message(self, reader):
         data = await reader.readuntil(separator=b'\n')
@@ -856,22 +859,23 @@ class Peer:
         if self.peers_changed:
             async with self.file_lock:
                 try:
-                    valid_peers = {
-                        peer_info: last_seen
-                        for peer_info, last_seen in self.peers.items()
-                        if self.is_valid_peer(peer_info) and last_seen != 0
-                    }
-                    async with aiofiles.open("peers.dat", "w") as f:
+                    temp_file = "peers.dat.temp"
+                    async with aiofiles.open(temp_file, "w") as f:
+                        valid_peers = {
+                            peer_info: last_seen
+                            for peer_info, last_seen in self.peers.items()
+                            if self.is_valid_peer(peer_info) and last_seen != 0
+                        }
                         for peer_info, last_seen in valid_peers.items():
                             await f.write(f"{peer_info}:{last_seen}\n")
+                    os.replace(temp_file, "peers.dat")
                     self.peers_changed = False
                     if self.debug:
                         logging.info("Peers file rewritten successfully.")
-                except OSError as e:
-                    logging.error(f"Failed to open peers.dat: {e}")
                 except Exception as e:
                     logging.error(f"Failed to rewrite peers.dat: {e}")
         self.file_write_scheduled = False
+
 
     async def cleanup_and_rewrite_peers(self):
         self.peers = {peer_info: last_seen for peer_info, last_seen in self.peers.items() if last_seen != 0}
@@ -885,3 +889,9 @@ class Peer:
             self.active_peers.items(),
             key=lambda x: float(x[1]['ping']) if x[1]['ping'] is not None else float('inf')
         )[:self.max_peers])
+        
+    async def shutdown(self):
+        self.shutdown_flag = True
+        await self.cleanup_and_rewrite_peers()
+        await self.close_p2p_server()
+        logging.info("Shutdown completed.")
