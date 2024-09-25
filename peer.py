@@ -76,6 +76,8 @@ class Peer:
         self.rewrite_lock = asyncio.Lock()
         self.connection_attempts = {}
         self.peers_connecting = set()
+        self.peers_connecting_lock = asyncio.Lock()
+        self.connection_attempts_lock = asyncio.Lock()
         self.config = config or {}
         self.debug = self.config.get('debug', 'false').lower() == 'true'
         self.p2p_server = None
@@ -155,7 +157,11 @@ class Peer:
                 return False
 
             port = int(port)
-            return not (32768 <= port <= 65535)
+            if not (1 <= port <= 65535):
+                logging.warning(f"Invalid port number: {port}")
+                return False
+
+            return True
         except ValueError as e:
             logging.error(f"Invalid peer address '{peer_info}': {e}")
             return False
@@ -216,7 +222,6 @@ class Peer:
         logging.debug(f"Sent hello message: {hello_message}")
         return send_time
 
-
     async def receive_message(self, reader):
         try:
             data = await reader.readuntil(separator=b'\n')
@@ -262,7 +267,8 @@ class Peer:
             self.save_trust_store()  # Save the updated trust store
         else:
             logging.warning(f"Untrusted peer {peer_server_id} attempting connection. Blacklisting.")
-            self.blacklist.add(peer_info_str)
+            async with self.peers_connecting_lock:
+                self.blacklist.add(peer_info_str)
             writer.close()
             await writer.wait_closed()
             return  # Terminate the connection
@@ -284,7 +290,6 @@ class Peer:
         await self.register_peer_connection(
             reader, writer, peer_info_str, peer_server_id, local_addr, local_port, bound_port, peer_version, ping
         )
-
 
     async def handle_ack_message(self, message, reader, writer):
         """Handle ack message and verify the peer's certificate."""
@@ -325,13 +330,12 @@ class Peer:
             reader, writer, peer_info, remote_server_id, local_addr, local_port, bound_port, remote_version, ping
         )
 
-
     async def handle_peer_list_message(self, message):
         new_peers = message.get("payload", [])
         logging.info(f"Received peer list: {new_peers}")
 
         valid_new_peers = {
-            peer_info: self.peers.get(peer_info, 0) for peer_info in new_peers
+            peer_info: int(time.time()) for peer_info in new_peers
             if self.is_valid_peer(peer_info)
         }
 
@@ -350,10 +354,11 @@ class Peer:
             await self.schedule_rewrite()
 
         for peer_info in valid_new_peers:
-            try:
-                host, port = peer_info.split(':')
-                port = int(port)
+            if peer_info == f"{self.host}:{self.p2p_port}":
+                logging.info(f"Skipping self-peer: {peer_info}")
+                continue
 
+            async with self.connection_attempts_lock, self.peers_connecting_lock:
                 if peer_info in self.connections:
                     if self.debug:
                         logging.info(f"Already connected to {peer_info}, skipping additional connection attempt.")
@@ -364,14 +369,11 @@ class Peer:
                         logging.info(f"Already connecting to {peer_info}, skipping additional connection attempt.")
                     continue
 
-                while len(self.connection_attempts) >= self.max_peers:
-                    await asyncio.sleep(1)
+            host, port = peer_info.split(':')
+            port = int(port)
+            asyncio.create_task(self.connect_to_peer(host, port, 5))
 
-                asyncio.create_task(self.connect_to_peer(host, port, 5))
-            except ValueError:
-                logging.warning(f"Invalid peer address format: {peer_info}")
         self.update_active_peers()
-
 
     async def respond_to_heartbeat(self, writer, message):
         peer_info = writer.get_extra_info('peername')
@@ -540,11 +542,12 @@ class Peer:
 
     async def establish_peer_connection(self, reader, writer, host, port, peer_info):
         """Establish the connection and verify trust using certificates."""
-        if peer_info in self.blacklist:
-            logging.warning(f"Peer {peer_info} is blacklisted. Aborting connection.")
-            writer.close()
-            await writer.wait_closed()
-            return False
+        async with self.peers_connecting_lock:
+            if peer_info in self.blacklist:
+                logging.warning(f"Peer {peer_info} is blacklisted. Aborting connection.")
+                writer.close()
+                await writer.wait_closed()
+                return False
 
         try:
             # Get the local and bound ports for the connection
@@ -576,7 +579,8 @@ class Peer:
                 logging.warning(f"Failed to verify certificate from ack message of peer {server_id}. Closing connection.")
                 writer.close()
                 await writer.wait_closed()
-                self.blacklist.add(peer_info)
+                async with self.peers_connecting_lock:
+                    self.blacklist.add(peer_info)
                 return False
 
             # Sign the peer's certificate and send your signature
@@ -599,7 +603,6 @@ class Peer:
                 reader, writer, peer_info, server_id, local_addr, local_port, bound_port, version, ping
             )
 
-
             return True
         except asyncio.IncompleteReadError as e:
             logging.error(f"IncompleteReadError while connecting to {peer_info}: {e}")
@@ -615,23 +618,36 @@ class Peer:
     async def connect_to_peer(self, host, port, max_retries=5):
         peer_info = f"{host}:{port}"
 
-        if peer_info in self.blacklist:
-            logging.warning(f"Peer {peer_info} is blacklisted. Aborting connection.")
-            return
+        async with self.peers_connecting_lock:
+            if peer_info in self.blacklist:
+                logging.warning(f"Peer {peer_info} is blacklisted. Aborting connection.")
+                return
 
-        if peer_info in self.peers_connecting:
-            logging.info(f"Already connecting to {peer_info}, skipping.")
-            return
+            if peer_info in self.peers_connecting:
+                logging.info(f"Already connecting to {peer_info}, skipping.")
+                return
 
-        self.peers_connecting.add(peer_info)
+            self.peers_connecting.add(peer_info)
 
         # Initialize connection attempts
-        self.connection_attempts[peer_info] = self.connection_attempts.get(peer_info, 0)
+        async with self.connection_attempts_lock:
+            self.connection_attempts[peer_info] = self.connection_attempts.get(peer_info, 0)
 
         try:
-            while self.connection_attempts[peer_info] < max_retries:
+            while True:
                 if self.shutdown_flag:
                     logging.info(f"Shutdown in progress, cancelling connection attempts to {peer_info}.")
+                    return
+
+                async with self.connection_attempts_lock:
+                    attempts = self.connection_attempts.get(peer_info, 0)
+
+                if attempts >= max_retries:
+                    logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts. Blacklisting peer.")
+                    async with self.peers_connecting_lock:
+                        self.blacklist.add(peer_info)
+                    async with self.connection_attempts_lock:
+                        self.connection_attempts.pop(peer_info, None)
                     return
 
                 try:
@@ -642,7 +658,8 @@ class Peer:
                     reader, writer = await asyncio.wait_for(connect_coro, timeout=timeout_duration)
                     if await self.establish_peer_connection(reader, writer, host, port, peer_info):
                         logging.info(f"Successfully connected to peer: {peer_info}")
-                        self.connection_attempts.pop(peer_info, None)
+                        async with self.connection_attempts_lock:
+                            self.connection_attempts.pop(peer_info, None)
                         return
                 except asyncio.TimeoutError:
                     logging.warning(f"Connection attempt to {peer_info} timed out after {timeout_duration} seconds.")
@@ -651,23 +668,22 @@ class Peer:
                 except Exception as e:
                     logging.error(f"Unexpected error connecting to {peer_info}: {e}", exc_info=True)
                 finally:
-                    # Safely increment connection attempts
-                    self.connection_attempts[peer_info] = self.connection_attempts.get(peer_info, 0) + 1
-                    logging.info(f"Connection attempt {self.connection_attempts[peer_info]} for {peer_info} failed.")
-                    await asyncio.sleep(self.connection_attempts[peer_info] * 5)
-
-            logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts. Blacklisting peer.")
-            self.blacklist.add(peer_info)
-            self.connection_attempts.pop(peer_info, None)
+                    # Safely increment connection attempts inside lock
+                    async with self.connection_attempts_lock:
+                        self.connection_attempts[peer_info] = self.connection_attempts.get(peer_info, 0) + 1
+                        attempts = self.connection_attempts[peer_info]
+                    logging.info(f"Connection attempt {attempts} for {peer_info} failed.")
+                    await asyncio.sleep(attempts * 5)
         finally:
-            self.peers_connecting.discard(peer_info)
-
+            async with self.peers_connecting_lock:
+                self.peers_connecting.discard(peer_info)
 
     async def connect_to_known_peers(self):
         """Attempt to connect to known peers, skipping blacklisted peers."""
-        available_peers = [
-            peer for peer in self.peers if peer not in self.peers_connecting and peer not in self.blacklist
-        ]
+        async with self.peers_connecting_lock:
+            available_peers = [
+                peer for peer in self.peers if peer not in self.peers_connecting and peer not in self.blacklist
+            ]
 
         logging.debug(f"Available peers to connect: {available_peers}")
 
@@ -677,16 +693,10 @@ class Peer:
 
         peers_to_connect = random.sample(available_peers, min(self.max_peers, len(available_peers)))
 
-        # Remove peers from peers_connecting after the attempt
-        self.peers_connecting.update(peers_to_connect)
-
         tasks = [asyncio.create_task(self.connect_to_peer(host, int(port)))
                 for host, port in (peer.split(':') for peer in peers_to_connect)]
 
-        try:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        finally:
-            self.peers_connecting.difference_update(peers_to_connect)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         # Update active peers after connection attempts
         self.update_active_peers()
@@ -902,7 +912,7 @@ class Peer:
         self.peers = {peer_info: last_seen for peer_info, last_seen in self.peers.items() if last_seen != 0}
         self.peers_changed = True
         await self.rewrite_peers_file()
-        await asyncio.gather(*[self.close_connection_by_server_id(server_id) for server_id in self.connections.keys()])
+        await asyncio.gather(*[self.close_connection_by_server_id(server_id) for server_id in list(self.connections.keys())])
 
     async def close_connection_by_server_id(self, server_id):
         if server_id in self.connections:
@@ -930,25 +940,26 @@ class Peer:
                 logging.info(f"Shutdown in progress, cancelling reconnection attempts for {peer_info}.")
                 return
 
-            if peer_info not in self.active_peers and peer_info not in self.peers_connecting:
-                try:
-                    jitter = random.uniform(0.8, 1.2)
-                    backoff_time = retry_intervals[attempt] * jitter
-                    logging.info(f"Scheduling reconnection attempt for {peer_info} in {backoff_time:.2f} seconds.")
-                    await asyncio.sleep(backoff_time)
+            async with self.peers_connecting_lock:
+                if peer_info not in self.active_peers and peer_info not in self.peers_connecting:
+                    try:
+                        jitter = random.uniform(0.8, 1.2)
+                        backoff_time = retry_intervals[attempt] * jitter
+                        logging.info(f"Scheduling reconnection attempt for {peer_info} in {backoff_time:.2f} seconds.")
+                        await asyncio.sleep(backoff_time)
 
-                    host, port = peer_info.split(':')
-                    await self.connect_to_peer(host, int(port))
+                        host, port = peer_info.split(':')
+                        await self.connect_to_peer(host, int(port))
 
-                    if peer_info in self.active_peers:
-                        logging.info(f"Reconnected to {peer_info} successfully.")
-                        break
-                except Exception as e:
-                    logging.error(f"Reconnection attempt {attempt} to {peer_info} failed: {e}")
-                    attempt += 1
-            else:
-                logging.info(f"{peer_info} is already active or attempting to reconnect.")
-                break
+                        if peer_info in self.active_peers:
+                            logging.info(f"Reconnected to {peer_info} successfully.")
+                            break
+                    except Exception as e:
+                        logging.error(f"Reconnection attempt {attempt} to {peer_info} failed: {e}")
+                        attempt += 1
+                else:
+                    logging.info(f"{peer_info} is already active or attempting to reconnect.")
+                    break
 
     async def request_peer_list(self, writer, peer_info):
         current_time = time.time()
