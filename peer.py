@@ -149,10 +149,12 @@ class Peer:
     async def connect_to_peer(self, host, port, max_retries=5):
         peer_info = f"{host}:{port}"
 
-        if peer_info not in self.connection_attempts:
-            self.connection_attempts[peer_info] = 0
+        if peer_info in self.connection_attempts:
+            return
 
-        while peer_info in self.connection_attempts and self.connection_attempts[peer_info] < max_retries:
+        self.connection_attempts[peer_info] = 0
+
+        while self.connection_attempts[peer_info] < max_retries:
             if self.shutdown_flag:
                 logging.info(f"Shutdown in progress, cancelling connection attempts to {peer_info}.")
                 return
@@ -163,74 +165,71 @@ class Peer:
 
             try:
                 reader, writer = await asyncio.open_connection(host, port)
-                local_addr, local_port = writer.get_extra_info('sockname')
-
-                send_time = await self.send_hello_message(writer)  # Get send time from hello message
-
-                # Wait for ack message to get server_id
-                ack_message = await self.receive_message(reader)
-                if ack_message.get("type") != "ack":
-                    logging.error("Did not receive ack message")
-                server_id = ack_message.get("server_id")
-
-                if server_id in self.active_peers:
-                    logging.info(f"Duplicate connection detected for server_id {server_id}. Closing new connection.")
-                    writer.close()
-                    await writer.wait_closed()
-                    return
-
-                receive_time = time.time()  # Calculate receive time
-                ping = receive_time - send_time  # Calculate ping time
-
-                self.connections[peer_info] = (reader, writer)
-                self.active_peers[server_id] = {
-                    'addr': peer_info,
-                    'addrlocal': f"{self.external_ip}:{local_port}",
-                    'addrbind': f"{self.external_ip}:{local_port}",
-                    'server_id': server_id,
-                    'version': ack_message.get("version", "unknown"),
-                    'lastseen': int(time.time()),
-                    'ping': round(ping, 3),  # Store ping time
-                    'send_time': send_time,
-                }
-
-                asyncio.create_task(self.listen_for_messages(reader, writer))
-                asyncio.create_task(self.send_heartbeat(writer, server_id))
-
-                self.peers[peer_info] = int(time.time())
-                self.peers_changed = True
-                await self.schedule_rewrite()
-                return
-
+                if await self.establish_peer_connection(reader, writer, host, port, peer_info):
+                    return  # Connection successful
             except Exception as e:
                 if self.debug:
                     logging.error(f"Error connecting to {host}:{port}: {e}")
                 self.connection_attempts[peer_info] += 1
                 await asyncio.sleep(self.connection_attempts[peer_info] * 5)
 
-        if peer_info in self.connection_attempts:
-            logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
-            self.connection_attempts.pop(peer_info, None)
-            return
+        logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts.")
+        self.connection_attempts.pop(peer_info, None)
+
+
+    async def establish_peer_connection(self, reader, writer, host, port, peer_info):
+        """Helper method to establish connection, send hello, and receive ack."""
+        try:
+            # Local port used for outgoing connection
+            local_addr, local_port = writer.get_extra_info('sockname')  
+            
+            # Bound port for incoming connections
+            bound_addr, bound_port = writer.get_extra_info('peername')  
+
+            send_time = await self.send_hello_message(writer)
+
+            ack_message = await self.receive_message(reader)
+            if ack_message.get("type") != "ack":
+                raise ValueError("Did not receive ack message")
+
+            server_id = ack_message.get("server_id")
+            if server_id in self.active_peers:
+                logging.info(f"Duplicate connection detected for server_id {server_id}. Closing new connection.")
+                writer.close()
+                await writer.wait_closed()
+                return False
+
+            receive_time = time.time()
+            ping = receive_time - send_time
+
+            # Register the connection with local and bound ports
+            self.register_peer_connection(reader, writer, peer_info, server_id, local_addr, local_port, bound_port, ack_message, ping)
+            asyncio.create_task(self.listen_for_messages(reader, writer))
+            asyncio.create_task(self.send_heartbeat(writer, server_id))
+
+            return True
+        except Exception as e:
+            logging.error(f"Error establishing connection to {peer_info}: {e}")
+            return False
+
+    def register_peer_connection(self, reader, writer, peer_info, server_id, local_addr, local_port, bound_port, ack_message, ping):
+        """Register a successfully established peer connection."""
+        self.connections[peer_info] = (reader, writer)
+        self.active_peers[server_id] = {
+            'addr': peer_info,
+            'addrlocal': f"{local_addr}:{local_port}",  # Local IP and outgoing (ephemeral) port
+            'addrbind': f"{self.external_ip}:{bound_port}",  # Bound IP and bound port for incoming connections
+            'server_id': server_id,
+            'version': ack_message.get("version", "unknown"),
+            'lastseen': int(time.time()),
+            'ping': round(ping, 3),
+        }
+        self.peers_changed = True
+        self.schedule_rewrite()
 
     async def receive_message(self, reader):
         data = await reader.readuntil(separator=b'\n')
         return json.loads(data.decode())
-
-    def detect_ip_address(self):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.connect(('8.8.8.8', 80))
-                ip = s.getsockname()[0]
-            return ip
-        except Exception as e:
-            logging.info(f"Failed to detect external IP address: {e}")
-            return '127.0.0.1'
-
-    def get_uptime(self):
-        current_time = datetime.datetime.now()
-        uptime = current_time - self.start_time
-        return uptime.total_seconds()
 
     async def handle_ack_message(self, message, writer):
         addr = writer.get_extra_info('peername')
@@ -239,8 +238,9 @@ class Peer:
         remote_server_id = message.get("server_id", "unknown")
         local_addr, local_port = writer.get_extra_info('sockname')
 
-        addrlocal = f"{self.external_ip}:{local_port}"
-        addrbind = f"{self.external_ip}:{local_port}"
+        # Add local and bound addresses
+        addrlocal = f"{local_addr}:{local_port}"
+        addrbind = f"{self.external_ip}:{local_port}"  # Make sure the bind address is external IP
 
         if remote_server_id in self.active_peers:
             logging.info(f"Duplicate connection detected for server_id {remote_server_id}. Closing new connection.")
@@ -268,20 +268,12 @@ class Peer:
         await self.schedule_rewrite()
         asyncio.create_task(self.send_heartbeat(writer))
 
+    # Remaining methods in Peer class (handle_hello_message, handle_disconnection, etc.) follow
+    # and they should ensure proper differentiation between addrlocal and addrbind.
+    
+    # In methods like handle_hello_message, make sure you're extracting
+    # addrlocal from the local port (outgoing), and addrbind from the bound port (incoming)
 
-    async def handle_disconnection(self, peer_info):
-        if self.shutdown_flag:
-            return
-
-        for server_id, peer_data in self.active_peers.items():
-            if peer_data["addr"] == peer_info:
-                del self.active_peers[server_id]
-                logging.info(f"Removed {peer_info} from active peers due to disconnection or error.")
-                break
-
-        self.update_active_peers()
-        self.peers_changed = True
-        await self.schedule_rewrite()
 
     async def handle_hello_message(self, message, writer):
         addr = writer.get_extra_info('peername')
