@@ -579,11 +579,12 @@ class Peer:
             logging.warning(f"Peer {peer_info} is blacklisted. Aborting connection.")
             return  # Do not attempt to connect if peer is blacklisted
 
-        if peer_info in self.connection_attempts or peer_info in self.peers_connecting:
-            logging.info(f"Skipping already connecting peer: {peer_info}")
+        if peer_info in self.active_peers:
+            logging.info(f"Already connected to peer: {peer_info}")
             return
 
-        self.connection_attempts[peer_info] = 0
+        # Initialize connection attempts
+        self.connection_attempts[peer_info] = self.connection_attempts.get(peer_info, 0)
 
         while self.connection_attempts[peer_info] < max_retries:
             if self.shutdown_flag:
@@ -595,11 +596,14 @@ class Peer:
                 return
 
             try:
+                logging.info(f"Attempting to connect to peer: {peer_info}")
                 reader, writer = await asyncio.open_connection(host, port)
                 if await self.establish_peer_connection(reader, writer, host, port, peer_info):
+                    logging.info(f"Successfully connected to peer: {peer_info}")
+                    self.connection_attempts.pop(peer_info, None)
                     return  # Connection successful
             except Exception as e:
-                logging.error(f"Error connecting to {host}:{port}: {e}")
+                logging.exception(f"Error connecting to {host}:{port}: {e}")
                 self.connection_attempts[peer_info] += 1
                 await asyncio.sleep(self.connection_attempts[peer_info] * 5)
 
@@ -607,6 +611,7 @@ class Peer:
         logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts. Blacklisting peer.")
         self.blacklist.add(peer_info)
         self.connection_attempts.pop(peer_info, None)
+
 
     async def connect_to_known_peers(self):
         """Attempt to connect to known peers, skipping blacklisted peers."""
