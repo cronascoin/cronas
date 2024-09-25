@@ -398,23 +398,21 @@ class Peer:
     async def send_peer_list(self, writer):
         logging.info("Attempting to send peer list...")
 
-        if connecting_ports := [
-            peer_data["addr"]
-            for peer_data in self.active_peers.values()
-            if self.is_valid_peer(peer_data["addr"])
-        ]:
+        # Collect the list of known peers from peers.dat or active peers
+        known_peers = list(self.peers.keys())
+        if known_peers:
             peer_list_message = {
                 "type": "peer_list",
-                "payload": connecting_ports,
+                "payload": known_peers,
                 "server_id": self.server_id,
                 "version": self.version,
                 "timestamp": time.time() + self.ntp_offset
             }
 
             await self.send_message(writer, peer_list_message)
-            logging.info("Sent active peer list.")
+            logging.info("Sent peer list.")
         else:
-            logging.warning("No valid active peers to send.")
+            logging.warning("No known peers to send.")
 
     async def send_heartbeat(self, writer, server_id=None):
         try:
