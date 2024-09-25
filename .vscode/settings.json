@@ -21,6 +21,8 @@
         "netifaces",
         "ntplib",
         "peername",
+        "pkcs",
+        "publickey",
         "pystun",
         "REUSEADDR",
         "REUSEPORT",

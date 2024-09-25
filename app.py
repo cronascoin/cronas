@@ -11,6 +11,7 @@ import logging
 import subprocess
 import netifaces
 import requests
+import argparse
 from peer import Peer
 from rpc import RPCServer
 
@@ -123,7 +124,8 @@ def load_config(config_path='cronas.conf'):
         'maxpeers': 10,
         'addnode': ['137.184.80.215:4333'],
         'rpc_password': generate_password(),
-        'debug': 'false'
+        'debug': 'false',
+        'log_level': 'INFO'  # Adding log_level to config
     }
 
     for key, value in default_config.items():
@@ -136,6 +138,10 @@ def load_config(config_path='cronas.conf'):
         logging.info("Configuration updated.")
     else:
         logging.info("Configuration is up to date.")
+
+    # Set the logging level dynamically
+    log_level = config.get('log_level', 'INFO').upper()
+    logging.getLogger().setLevel(log_level)
 
     return config
 
@@ -162,8 +168,8 @@ async def cancel_remaining_tasks():
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-async def main():
-    config = load_config()
+async def main(config_path):
+    config = load_config(config_path)
     server_id = config.get('server_id')
     rpc_password = config.get('rpc_password')
     rpc_port = int(config.get('rpc_port', 4334))
@@ -186,8 +192,14 @@ async def main():
     finally:
         await shutdown(peer, rpc_server)
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Cronas P2P App")
+    parser.add_argument('--config', type=str, default='cronas.conf', help='Path to configuration file')
+    return parser.parse_args()
+
 if __name__ == '__main__':
+    args = parse_args()
     try:
-        asyncio.run(main())
+        asyncio.run(main(config_path=args.config))
     except KeyboardInterrupt:
         logging.info("Shutdown initiated by user.")
