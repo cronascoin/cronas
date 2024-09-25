@@ -15,8 +15,6 @@ import argparse
 from peer import Peer
 from rpc import RPCServer
 
-logging.basicConfig(level=logging.INFO)
-
 def generate_password(length=12):
     characters = string.ascii_letters + string.digits + string.punctuation
     return ''.join(random.choice(characters) for _ in range(length))
@@ -26,7 +24,7 @@ def get_short_commit_hash():
     if result.returncode == 0:
         return result.stdout.strip()
     else:
-        raise RuntimeError(f"Git command failed with error: {result.stderr}")
+        return 'unknown'  # Handle case where Git command fails
 
 version = f'0.0.1-{get_short_commit_hash()}'
 
@@ -75,7 +73,7 @@ def write_config(config, config_path='cronas.conf'):
 
 def get_out_ip():
     try:
-        response = requests.get('https://api.ipify.org?format=json')
+        response = requests.get('https://api.ipify.org?format=json', timeout=5)
         response.raise_for_status()
         ip = response.json()['ip']
         if ip == '127.0.0.1':
@@ -88,7 +86,7 @@ def get_out_ip():
 def get_fallback_ip():
     """Fallback method to detect external IP using a different service."""
     try:
-        response = requests.get('https://ifconfig.me')
+        response = requests.get('https://ifconfig.me', timeout=5)
         response.raise_for_status()
         ip = response.text.strip()
         if ip == '127.0.0.1':
@@ -125,7 +123,7 @@ def load_config(config_path='cronas.conf'):
         'addnode': ['137.184.80.215:4333'],
         'rpc_password': generate_password(),
         'debug': 'false',
-        'log_level': 'INFO'  # Adding log_level to config
+        'log_level': 'INFO'
     }
 
     for key, value in default_config.items():
@@ -180,13 +178,12 @@ async def main(config_path):
 
     rpc_server = RPCServer(peer, '127.0.0.1', rpc_port, rpc_password)
 
-    tasks = [
-        peer.start(),
-        rpc_server.start_rpc_server(),
-    ]
+    # Create tasks for peer and RPC server
+    peer_task = asyncio.create_task(peer.start())
+    rpc_task = asyncio.create_task(rpc_server.start_rpc_server())
 
     try:
-        await asyncio.gather(*tasks)
+        await asyncio.gather(peer_task, rpc_task)
     except Exception as e:
         logging.error(f"Error during execution: {e}")
     finally:
