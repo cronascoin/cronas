@@ -143,17 +143,17 @@ def load_config(config_path='cronas.conf'):
 async def shutdown(peer, rpc_server):
     logging.info("Shutting down...")
     try:
-        await peer.close_p2p_server()
+        await peer.shutdown()
     except Exception as e:
-        logging.error(f"Error closing P2P server: {e}")
+        logging.error(f"Error shutting down Peer: {e}")
     
     try:
         await rpc_server.close_rpc_server()
     except Exception as e:
         logging.error(f"Error closing RPC server: {e}")
     
-    await cancel_remaining_tasks()
     logging.info("Shutdown complete.")
+
 
 async def cancel_remaining_tasks():
     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
@@ -181,10 +181,15 @@ async def main(config_path):
 
     try:
         await asyncio.gather(peer_task, rpc_task)
+    except KeyboardInterrupt:
+        logging.info("Shutdown initiated by user.")
+        await shutdown(peer, rpc_server)
     except Exception as e:
         logging.error(f"Error during execution: {e}")
-    finally:
         await shutdown(peer, rpc_server)
+    finally:
+        if not peer.shutdown_flag:
+            await shutdown(peer, rpc_server)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Cronas P2P App")

@@ -7,6 +7,7 @@
         "aiohttp",
         "configfile",
         "cooldown",
+        "coro",
         "cronas",
         "DGRAM",
         "EADDRINUSE",

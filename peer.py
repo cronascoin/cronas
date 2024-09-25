@@ -309,8 +309,9 @@ class Peer:
         await self.schedule_rewrite()
 
         # Start sending heartbeat
-        asyncio.create_task(self.send_heartbeat(writer, remote_server_id))
-
+        heartbeat_task = asyncio.create_task(self.send_heartbeat(writer, remote_server_id))
+        self.heartbeat_tasks[remote_server_id] = heartbeat_task
+        
     async def handle_peer_list_message(self, message):
         new_peers = message.get("payload", [])
         logging.info("Processing new peer list...")
@@ -395,16 +396,11 @@ class Peer:
             logging.warning("No valid active peers to send.")
 
     async def send_heartbeat(self, writer, server_id=None):
-        retry_count = 0
-        max_retries = 3
-        retry_delay = 5
-
         try:
-            await asyncio.sleep(60)
             while not writer.is_closing():
                 if self.shutdown_flag:
-                    logging.info("Shutdown in progress, stopping heartbeat.")
-                    return
+                    logging.info(f"Shutdown in progress, stopping heartbeat to {server_id}.")
+                    return  # Exit the heartbeat loop
 
                 heartbeat_msg = {
                     "type": "heartbeat",
@@ -418,30 +414,38 @@ class Peer:
                     await self.send_message(writer, heartbeat_msg)
                     logging.info(f"Heartbeat sent to {server_id}")
 
-                    retry_count = 0
+                    # Sleep in small increments to allow for quick shutdown
+                    total_sleep = 0
+                    heartbeat_interval = 60  # seconds
+                    while total_sleep < heartbeat_interval:
+                        if self.shutdown_flag:
+                            logging.info(f"Shutdown in progress, stopping heartbeat to {server_id}.")
+                            return
+                        await asyncio.sleep(1)
+                        total_sleep += 1
 
-                    await asyncio.sleep(60)
+                except ConnectionError as e:
+                    logging.warning(f"Error sending heartbeat to {server_id}: {e}")
+                    writer.close()
+                    await writer.wait_closed()
+                    return
 
-                except (ConnectionResetError, asyncio.CancelledError) as e:
-                    logging.warning(f"Error sending heartbeat to {server_id}: {e}. Retrying...")
-
-                    retry_count += 1
-                    if retry_count >= max_retries:
-                        logging.error(f"Max retries reached. Closing connection to {server_id}.")
-                        writer.close()
-                        await writer.wait_closed()
-                        return
-
-                    await asyncio.sleep(retry_delay)
+                except asyncio.CancelledError:
+                    logging.info(f"Heartbeat task for {server_id} was cancelled.")
+                    return
 
                 except Exception as e:
-                    logging.error(f"Unexpected error during heartbeat: {e}")
+                    logging.error(f"Unexpected error during heartbeat to {server_id}: {e}")
                     return
 
         except asyncio.CancelledError:
-            logging.info("Heartbeat sending task was cancelled.")
+            logging.info(f"Heartbeat sending task was cancelled for {server_id}.")
+            # Optionally close the writer if necessary
+            if not writer.is_closing():
+                writer.close()
+                await writer.wait_closed()
         except Exception as e:
-            logging.error(f"Error sending heartbeat: {e}")
+            logging.error(f"Error in heartbeat task for {server_id}: {e}")
 
     async def process_message(self, message, writer):
         addr = writer.get_extra_info('peername')
@@ -602,7 +606,7 @@ class Peer:
                     return
             except asyncio.TimeoutError:
                 logging.warning(f"Connection attempt to {peer_info} timed out after {timeout_duration} seconds.")
-            except (ConnectionRefusedError, OSError) as e:
+            except OSError as e:
                 logging.warning(f"Connection to {peer_info} failed: {e}")
             except Exception as e:
                 logging.error(f"Unexpected error connecting to {peer_info}: {e}", exc_info=True)
@@ -1094,3 +1098,32 @@ class Peer:
             # If the private key file doesn't exist, generate and save a new one
             self.key_pair = self.generate_key_pair()
             self.save_key_pair()
+
+    async def shutdown(self):
+        logging.info("Shutting down Peer...")
+        self.shutdown_flag = True
+
+        # Cancel heartbeat tasks
+        for server_id, task in self.heartbeat_tasks.items():
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                    logging.info(f"Heartbeat task for {server_id} cancelled.")
+                except asyncio.CancelledError:
+                    logging.info(f"Heartbeat task for {server_id} cancelled via exception.")
+                except Exception as e:
+                    logging.error(f"Error cancelling heartbeat task for {server_id}: {e}")
+        self.heartbeat_tasks.clear()
+
+        # Close all peer connections
+        for peer_info, (reader, writer) in self.connections.items():
+            if not writer.is_closing():
+                writer.close()
+                await writer.wait_closed()
+                logging.info(f"Connection with {peer_info} closed during shutdown.")
+        self.connections.clear()
+
+        # Close the P2P server
+        await self.close_p2p_server()
+        logging.info("Peer shutdown complete.")
