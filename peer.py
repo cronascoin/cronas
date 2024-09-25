@@ -398,9 +398,7 @@ class Peer:
     async def send_peer_list(self, writer):
         logging.info("Attempting to send peer list...")
 
-        # Collect the list of known peers from peers.dat or active peers
-        known_peers = list(self.peers.keys())
-        if known_peers:
+        if known_peers := list(self.peers.keys()):
             peer_list_message = {
                 "type": "peer_list",
                 "payload": known_peers,
