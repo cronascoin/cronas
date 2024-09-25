@@ -572,12 +572,11 @@ class Peer:
 
 
     async def connect_to_peer(self, host, port, max_retries=5):
-        """Connect to a peer, skipping if they are blacklisted."""
         peer_info = f"{host}:{port}"
 
         if peer_info in self.blacklist:
             logging.warning(f"Peer {peer_info} is blacklisted. Aborting connection.")
-            return  # Do not attempt to connect if peer is blacklisted
+            return
 
         if peer_info in self.active_peers:
             logging.info(f"Already connected to peer: {peer_info}")
@@ -611,6 +610,8 @@ class Peer:
         logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts. Blacklisting peer.")
         self.blacklist.add(peer_info)
         self.connection_attempts.pop(peer_info, None)
+
+
 
 
     async def connect_to_known_peers(self):
