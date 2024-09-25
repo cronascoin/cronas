@@ -889,11 +889,34 @@ class Peer:
         self.peers = {peer_info: last_seen for peer_info, last_seen in self.peers.items() if last_seen != 0}
         self.peers_changed = True
         await self.rewrite_peers_file()
-
         await asyncio.gather(*[self.close_connection(*peer.split(':')) for peer in self.connections.keys()])
+
 
     def update_active_peers(self):
         self.active_peers = dict(sorted(
             self.active_peers.items(),
             key=lambda x: float(x[1]['ping']) if x[1]['ping'] is not None else float('inf')
         )[:self.max_peers])
+
+    async def rewrite_peers_file(self):
+        """Write the peer data to the peers.dat file."""
+        if not self.peers_changed:
+            return
+
+        async with self.file_lock:
+            try:
+                valid_peers = {
+                    peer_info: last_seen
+                    for peer_info, last_seen in self.peers.items()
+                    if self.is_valid_peer(peer_info) and last_seen != 0
+                }
+                async with aiofiles.open("peers.dat", "w") as f:
+                    for peer_info, last_seen in valid_peers.items():
+                        await f.write(f"{peer_info}:{last_seen}\n")
+                self.peers_changed = False
+                if self.debug:
+                    logging.info("Peers file rewritten successfully.")
+            except OSError as e:
+                logging.error(f"Failed to open peers.dat: {e}")
+            except Exception as e:
+                logging.error(f"Failed to rewrite peers.dat: {e}")
