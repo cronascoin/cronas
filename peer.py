@@ -200,7 +200,7 @@ class Peer:
             ping = receive_time - send_time
 
             # Pass both local and bound ports to the register_peer_connection function
-            self.register_peer_connection(reader, writer, peer_info, server_id, local_addr, local_port, bound_port, ack_message, ping)
+            await self.register_peer_connection(reader, writer, peer_info, server_id, local_addr, local_port, bound_port, ack_message, ping)
             asyncio.create_task(self.listen_for_messages(reader, writer))
             asyncio.create_task(self.send_heartbeat(writer, server_id))
 
@@ -210,7 +210,7 @@ class Peer:
             return False
 
 
-    def register_peer_connection(self, reader, writer, peer_info, server_id, local_addr, local_port, bound_port, ack_message, ping):
+    async def register_peer_connection(self, reader, writer, peer_info, server_id, local_addr, local_port, bound_port, ack_message, ping):
         """Register a successfully established peer connection."""
         self.connections[peer_info] = (reader, writer)
         self.active_peers[server_id] = {
@@ -223,7 +223,7 @@ class Peer:
             'ping': round(ping, 3),
         }
         self.peers_changed = True
-        self.schedule_rewrite()
+        await self.schedule_rewrite()
 
 
     async def receive_message(self, reader):
