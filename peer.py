@@ -1,4 +1,4 @@
-# Copyright 2024 Cronas.org
+# Copyright 2023 Cronas.org
 # peer.py
 
 import asyncio
@@ -212,11 +212,21 @@ class Peer:
         }
         send_time = time.time()
         await self.send_message(writer, hello_message)
+        logging.debug(f"Sent hello message: {hello_message}")
         return send_time
 
     async def receive_message(self, reader):
-        data = await reader.readuntil(separator=b'\n')
-        return json.loads(data.decode())
+        try:
+            data = await reader.readuntil(separator=b'\n')
+            message = json.loads(data.decode())
+            logging.debug(f"Received message: {message}")
+            return message
+        except asyncio.IncompleteReadError as e:
+            logging.error(f"IncompleteReadError: {e}")
+            raise
+        except Exception as e:
+            logging.error(f"Error receiving message: {e}")
+            raise
 
     async def send_ack_message(self, writer, version, server_id):
         ack_message = {
@@ -268,21 +278,16 @@ class Peer:
             reader, writer, peer_info_str, peer_server_id, local_addr, local_port, bound_port, message, ping
         )
 
-        # Start listening for messages
-        asyncio.create_task(self.listen_for_messages(reader, writer, peer_server_id))
-
-
     async def handle_ack_message(self, message, reader, writer):
         """Handle ack message and verify the peer's certificate."""
         addr = writer.get_extra_info('peername')
         peer_info = f"{addr[0]}:{addr[1]}"
-        message.get("version", "unknown")
+        remote_version = message.get("version", "unknown")
         remote_server_id = message.get("server_id", "unknown")
         ack_certificate = message.get('certificate')
 
         local_addr, local_port = writer.get_extra_info('sockname')
-        bound_addr, bound_port = writer.get_extra_info('peername')
-
+        _, bound_port = writer.get_extra_info('peername')  # Only bound_port is used
 
         # Verify the peer's certificate
         if ack_certificate and self.verify_peer_certificate(ack_certificate):
@@ -314,7 +319,7 @@ class Peer:
 
     async def handle_peer_list_message(self, message):
         new_peers = message.get("payload", [])
-        logging.info("Processing new peer list...")
+        logging.info(f"Received peer list: {new_peers}")
 
         valid_new_peers = {
             peer_info: self.peers.get(peer_info, 0) for peer_info in new_peers
@@ -354,11 +359,8 @@ class Peer:
                 logging.warning(f"Invalid peer address format: {peer_info}")
         self.update_active_peers()
 
-
     async def respond_to_heartbeat(self, writer, message):
         peer_info = writer.get_extra_info('peername')
-        f"{peer_info[0]}:{peer_info[1]}"
-
         peer_server_id = message.get('server_id')
 
         if peer_server_id in self.active_peers:
@@ -380,11 +382,12 @@ class Peer:
     async def send_peer_list(self, writer):
         logging.info("Attempting to send peer list...")
 
-        if connecting_ports := [
+        connecting_ports = [
             peer_data["addr"]
             for peer_data in self.active_peers.values()
             if self.is_valid_peer(peer_data["addr"])
-        ]:
+        ]
+        if connecting_ports:
             peer_list_message = {
                 "type": "peer_list",
                 "payload": connecting_ports,
@@ -450,7 +453,7 @@ class Peer:
         except Exception as e:
             logging.error(f"Error in heartbeat task for {server_id}: {e}")
 
-    async def process_message(self, message, writer):
+    async def process_message(self, message, reader, writer):
         addr = writer.get_extra_info('peername')
         peer_info = f"{addr[0]}:{addr[1]}"
         if self.debug:
@@ -458,9 +461,9 @@ class Peer:
 
         message_type = message.get("type")
         if message_type == "hello":
-            await self.handle_hello_message(message, writer)
+            await self.handle_hello_message(message, reader, writer)
         elif message_type == "ack":
-            await self.handle_ack_message(message, writer)
+            await self.handle_ack_message(message, reader, writer)
         elif message_type == "request_peer_list":
             await self.send_peer_list(writer)
         elif message_type == "heartbeat":
@@ -483,9 +486,9 @@ class Peer:
                     logging.info("Connection closed by peer.")
                     break
                 message = json.loads(data_buffer.decode().strip())
-                await self.process_message(message, writer)
-        except asyncio.IncompleteReadError:
-            logging.info("Incomplete read error, attempting to reconnect...")
+                await self.process_message(message, reader, writer)
+        except asyncio.IncompleteReadError as e:
+            logging.error(f"IncompleteReadError with {peer_info}: {e}")
             await self.handle_disconnection(server_id)
             asyncio.create_task(self.reconnect_to_peer_by_server_id(server_id))
         except ConnectionResetError as e:
@@ -533,7 +536,7 @@ class Peer:
         try:
             # Get the local and bound ports for the connection
             local_addr, local_port = writer.get_extra_info('sockname')
-            bound_addr, bound_port = writer.get_extra_info('peername')
+            _, bound_port = writer.get_extra_info('peername')  # Only bound_port is used
 
             send_time = await self.send_hello_message(writer)
             ack_message = await self.receive_message(reader)
@@ -555,6 +558,7 @@ class Peer:
                 # Add the peer's certificate to the trust store
                 self.trust_store[server_id] = {'certificate': ack_certificate, 'trusted': True}
                 logging.info(f"Trusted peer {server_id} added to trust store from ack message.")
+                self.save_trust_store()
             else:
                 logging.warning(f"Failed to verify certificate from ack message of peer {server_id}. Closing connection.")
                 writer.close()
@@ -582,8 +586,15 @@ class Peer:
             )
 
             return True
+        except asyncio.IncompleteReadError as e:
+            logging.error(f"IncompleteReadError while connecting to {peer_info}: {e}")
+            writer.close()
+            await writer.wait_closed()
+            return False
         except Exception as e:
             logging.error(f"Error establishing connection to {peer_info}: {e}")
+            writer.close()
+            await writer.wait_closed()
             return False
 
     async def connect_to_peer(self, host, port, max_retries=5):
@@ -688,7 +699,7 @@ class Peer:
                     await writer.wait_closed()
                     return
                 # Proceed to handle the hello message
-                await self.handle_hello_message(message, writer)
+                await self.handle_hello_message(message, reader, writer)
             else:
                 logging.warning("First message was not a hello message. Closing connection.")
                 writer.close()
