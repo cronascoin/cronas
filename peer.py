@@ -582,7 +582,6 @@ class Peer:
             logging.info(f"Already connected to peer: {peer_info}")
             return
 
-        # Initialize connection attempts
         self.connection_attempts[peer_info] = self.connection_attempts.get(peer_info, 0)
 
         while self.connection_attempts[peer_info] < max_retries:
@@ -592,15 +591,21 @@ class Peer:
 
             try:
                 logging.info(f"Attempting to connect to peer: {peer_info}")
-                reader, writer = await asyncio.open_connection(host, port)
+                # Set a timeout for the connection attempt
+                timeout_duration = 10  # seconds
+                connect_coro = asyncio.open_connection(host, port)
+                reader, writer = await asyncio.wait_for(connect_coro, timeout=timeout_duration)
+
                 if await self.establish_peer_connection(reader, writer, host, port, peer_info):
                     logging.info(f"Successfully connected to peer: {peer_info}")
                     self.connection_attempts.pop(peer_info, None)
                     return
-            except ConnectionRefusedError as e:
-                logging.error(f"Connection refused by {host}:{port}: {e}")
+            except asyncio.TimeoutError:
+                logging.warning(f"Connection attempt to {peer_info} timed out after {timeout_duration} seconds.")
+            except (ConnectionRefusedError, OSError) as e:
+                logging.warning(f"Connection to {peer_info} failed: {e}")
             except Exception as e:
-                logging.exception(f"Error connecting to {host}:{port}: {e}")
+                logging.error(f"Unexpected error connecting to {peer_info}: {e}", exc_info=True)
             finally:
                 self.connection_attempts[peer_info] += 1
                 logging.info(f"Connection attempt {self.connection_attempts[peer_info]} for {peer_info} failed.")
