@@ -376,7 +376,7 @@ class Peer:
         self.update_active_peers()
 
     async def respond_to_heartbeat(self, writer, message):
-        peer_info = writer.get_extra_info('peername')
+        writer.get_extra_info('peername')
         peer_server_id = message.get('server_id')
 
         if peer_server_id in self.active_peers:
