@@ -5,3 +5,4 @@ irclient.py
 settings.json
 cronas.conf
 my_certificate.json
+private_key.pem
