@@ -10,6 +10,7 @@
         "cronas",
         "DGRAM",
         "EADDRINUSE",
+        "forcelist",
         "getpeerinfo",
         "heartbeatlogging",
         "ifaddresses",
