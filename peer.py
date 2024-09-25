@@ -2,6 +2,7 @@
 # peer.py
 
 import asyncio
+import contextlib
 import datetime
 import errno
 import json
@@ -54,7 +55,7 @@ class Peer:
         self.host = host
         self.p2p_port = p2p_port
         self.peers = {}
-        self.active_peers = {}
+        self.active_peers = {}  # Key: server_id, Value: peer info
         self.trust_store = {}
         self.certificates = {}
         self.blacklist = set()
@@ -65,9 +66,9 @@ class Peer:
         self.version = version
         self.file_lock = asyncio.Lock()
         self.peers_changed = False
-        self.connections = {}
+        self.connections = {}  # Key: server_id, Value: (reader, writer)
         self.shutdown_flag = False
-        self.heartbeat_tasks = {}
+        self.heartbeat_tasks = {}  # Key: server_id, Value: task
         self.file_write_scheduled = False
         self.pending_file_write = False
         self.file_write_delay = 10
@@ -81,7 +82,7 @@ class Peer:
         self.last_peer_list_request = {}
         self.start_time = datetime.datetime.now()
         self.ntp_offset = self.get_ntp_offset()
-        self.load_key_pair() 
+        self.load_key_pair()
         self.load_certificate()  # Load or generate own certificate
         self.load_trust_store()  # Load the trust store
 
@@ -108,7 +109,6 @@ class Peer:
             'public_key': public_key_pem,
             'signatures': {self.server_id: base64.b64encode(signature).decode()},
         }
-
 
     def get_ntp_offset(self):
         try:
@@ -214,7 +214,6 @@ class Peer:
         await self.send_message(writer, hello_message)
         return send_time
 
-
     async def receive_message(self, reader):
         data = await reader.readuntil(separator=b'\n')
         return json.loads(data.decode())
@@ -230,50 +229,64 @@ class Peer:
         await self.send_message(writer, ack_message)
         logging.info(f"Sent ack message to peer with server_id: {server_id}")
 
-
-    async def handle_hello_message(self, message, writer):
+    async def handle_hello_message(self, message, reader, writer):
         """Handle hello message and verify the peer's certificate."""
         peer_certificate = message['certificate']
-        peer_server_id = peer_certificate['server_id']
-        peer_info = f"{writer.get_extra_info('peername')[0]}:{writer.get_extra_info('peername')[1]}"
+        peer_server_id = message['server_id']
+        peer_info = writer.get_extra_info('peername')
+        peer_info_str = f"{peer_info[0]}:{peer_info[1]}"
 
         # Verify the peer's certificate
         if self.verify_peer_certificate(peer_certificate):
             # Add the peer's certificate to the trust store
             self.trust_store[peer_server_id] = {'certificate': peer_certificate, 'trusted': True}
             logging.info(f"Trusted peer {peer_server_id} connection established.")
-            self.trust_store[peer_server_id] = {'certificate': peer_certificate, 'trusted': True}
-            logging.info(f"Trusted peer {peer_server_id} added to trust store.")
             self.save_trust_store()  # Save the updated trust store
         else:
             logging.warning(f"Untrusted peer {peer_server_id} attempting connection. Blacklisting.")
-            self.blacklist.add(peer_info)
+            self.blacklist.add(peer_info_str)
             writer.close()
             await writer.wait_closed()
             return  # Terminate the connection
 
-        # Continue with the handshake
+        # Check for existing connection to this server_id
+        if peer_server_id in self.active_peers:
+            logging.info(f"Already connected to server_id {peer_server_id}. Closing new incoming connection.")
+            writer.close()
+            await writer.wait_closed()
+            return
+
+        # Send ack message
         await self.send_ack_message(writer, self.version, self.server_id)
 
+        # Register the connection
+        local_addr, local_port = writer.get_extra_info('sockname')
+        _, bound_port = writer.get_extra_info('peername')  # Only bound_port is used
+        ping = 0  # Since this is an incoming connection, we don't have a ping yet
 
-    async def handle_ack_message(self, message, writer):
+        await self.register_peer_connection(
+            reader, writer, peer_info_str, peer_server_id, local_addr, local_port, bound_port, message, ping
+        )
+
+        # Start listening for messages
+        asyncio.create_task(self.listen_for_messages(reader, writer, peer_server_id))
+
+
+    async def handle_ack_message(self, message, reader, writer):
         """Handle ack message and verify the peer's certificate."""
         addr = writer.get_extra_info('peername')
         peer_info = f"{addr[0]}:{addr[1]}"
-        remote_version = message.get("version", "unknown")
+        message.get("version", "unknown")
         remote_server_id = message.get("server_id", "unknown")
         ack_certificate = message.get('certificate')
 
         local_addr, local_port = writer.get_extra_info('sockname')
+        bound_addr, bound_port = writer.get_extra_info('peername')
 
-        addrlocal = f"{self.external_ip}:{local_port}"
-        addrbind = f"{self.external_ip}:{local_port}"
 
         # Verify the peer's certificate
         if ack_certificate and self.verify_peer_certificate(ack_certificate):
             # Add the peer's certificate to the trust store
-            self.trust_store[remote_server_id] = {'certificate': ack_certificate, 'trusted': True}
-            logging.info(f"Trusted peer {remote_server_id} added to trust store from ack message.")
             self.trust_store[remote_server_id] = {'certificate': ack_certificate, 'trusted': True}
             logging.info(f"Trusted peer {remote_server_id} added to trust store from ack message.")
             self.save_trust_store()  # Save the updated trust store
@@ -283,8 +296,9 @@ class Peer:
             await writer.wait_closed()
             return  # Terminate the connection
 
+        # Check for existing connection to this server_id
         if remote_server_id in self.active_peers:
-            logging.info(f"Duplicate connection detected for server_id {remote_server_id}. Closing new connection.")
+            logging.info(f"Already connected to server_id {remote_server_id}. Closing new connection.")
             writer.close()
             await writer.wait_closed()
             return
@@ -293,25 +307,11 @@ class Peer:
         send_time = self.active_peers.get(remote_server_id, {}).get('send_time', receive_time)
         ping = receive_time - send_time
 
-        self.active_peers[remote_server_id] = {
-            "addr": peer_info,
-            "addrlocal": addrlocal,
-            "addrbind": addrbind,
-            "server_id": remote_server_id,
-            "version": remote_version,
-            "lastseen": int(time.time()),
-            "ping": round(ping, 3)
-        }
+        # Register the peer connection
+        await self.register_peer_connection(
+            reader, writer, peer_info, remote_server_id, local_addr, local_port, bound_port, message, ping
+        )
 
-        logging.info(f"Connection fully established with {peer_info}, version {remote_version}, server_id {remote_server_id}")
-        self.update_active_peers()
-        self.mark_peer_changed()
-        await self.schedule_rewrite()
-
-        # Start sending heartbeat
-        heartbeat_task = asyncio.create_task(self.send_heartbeat(writer, remote_server_id))
-        self.heartbeat_tasks[remote_server_id] = heartbeat_task
-        
     async def handle_peer_list_message(self, message):
         new_peers = message.get("payload", [])
         logging.info("Processing new peer list...")
@@ -354,15 +354,18 @@ class Peer:
                 logging.warning(f"Invalid peer address format: {peer_info}")
         self.update_active_peers()
 
+
     async def respond_to_heartbeat(self, writer, message):
         peer_info = writer.get_extra_info('peername')
-        peer_info_str = f"{peer_info[0]}:{peer_info[1]}"
+        f"{peer_info[0]}:{peer_info[1]}"
 
-        if peer_info_str in self.active_peers:
-            self.active_peers[peer_info_str]['lastseen'] = int(time.time())
+        peer_server_id = message.get('server_id')
+
+        if peer_server_id in self.active_peers:
+            self.active_peers[peer_server_id]['lastseen'] = int(time.time())
             self.peers_changed = True
             if self.debug:
-                logging.info(f"Updated last seen for {peer_info_str}")
+                logging.info(f"Updated last seen for {peer_server_id}")
 
         ack_message = {
             "type": "heartbeat_ack",
@@ -372,7 +375,7 @@ class Peer:
         }
         await self.send_message(writer, ack_message)
         if self.debug:
-            logging.info(f"Sent heartbeat acknowledgment to {peer_info_str}.")
+            logging.info(f"Sent heartbeat acknowledgment to {peer_server_id}.")
 
     async def send_peer_list(self, writer):
         logging.info("Attempting to send peer list...")
@@ -467,7 +470,7 @@ class Peer:
         elif message_type == "certificate_signature":
             await self.handle_certificate_signature(message)
 
-    async def listen_for_messages(self, reader, writer):
+    async def listen_for_messages(self, reader, writer, server_id):
         addr = writer.get_extra_info('peername')
         host, port = addr[0], addr[1]
         peer_info = f"{host}:{port}"
@@ -483,15 +486,15 @@ class Peer:
                 await self.process_message(message, writer)
         except asyncio.IncompleteReadError:
             logging.info("Incomplete read error, attempting to reconnect...")
-            await self.handle_disconnection(peer_info)
-            asyncio.create_task(self.reconnect_to_peer(host, int(port)))
+            await self.handle_disconnection(server_id)
+            asyncio.create_task(self.reconnect_to_peer_by_server_id(server_id))
         except ConnectionResetError as e:
             logging.error(f"Connection reset error with {peer_info}: {e}")
-            await self.handle_disconnection(peer_info)
-            asyncio.create_task(self.reconnect_to_peer(host, int(port)))
+            await self.handle_disconnection(server_id)
+            asyncio.create_task(self.reconnect_to_peer_by_server_id(server_id))
         except Exception as e:
             logging.error(f"Error during communication with {peer_info}: {e}")
-            await self.handle_disconnection(peer_info)
+            await self.handle_disconnection(server_id)
         finally:
             logging.info(f"Closing connection with {peer_info}")
             if not writer.is_closing():
@@ -500,7 +503,7 @@ class Peer:
 
     async def register_peer_connection(self, reader, writer, peer_info, server_id, local_addr, local_port, bound_port, ack_message, ping):
         """Register a successfully established peer connection."""
-        self.connections[peer_info] = (reader, writer)
+        self.connections[server_id] = (reader, writer)
         self.active_peers[server_id] = {
             'addr': peer_info,
             'addrlocal': f"{local_addr}:{local_port}",
@@ -512,8 +515,12 @@ class Peer:
         }
         self.peers_changed = True
         await self.schedule_rewrite()
-        asyncio.create_task(self.listen_for_messages(reader, writer))
-        asyncio.create_task(self.send_heartbeat(writer, server_id))
+        asyncio.create_task(self.listen_for_messages(reader, writer, server_id))
+        heartbeat_task = asyncio.create_task(self.send_heartbeat(writer, server_id))
+        self.heartbeat_tasks[server_id] = heartbeat_task
+
+        # Request peer list from the connected peer
+        await self.request_peer_list(writer, peer_info)
 
     async def establish_peer_connection(self, reader, writer, host, port, peer_info):
         """Establish the connection and verify trust using certificates."""
@@ -531,49 +538,53 @@ class Peer:
             send_time = await self.send_hello_message(writer)
             ack_message = await self.receive_message(reader)
 
-            # If the handshake is successful (received ack), process the connection
-            if ack_message.get("type") == "ack":
-                server_id = ack_message.get("server_id")
-                ack_certificate = ack_message.get('certificate')
-
-                # Verify the peer's certificate
-                if ack_certificate and self.verify_peer_certificate(ack_certificate):
-                    # Add the peer's certificate to the trust store
-                    self.trust_store[server_id] = {'certificate': ack_certificate, 'trusted': True}
-                    logging.info(f"Trusted peer {server_id} added to trust store from ack message.")
-                else:
-                    logging.warning(f"Failed to verify certificate from ack message of peer {server_id}. Closing connection.")
-                    writer.close()
-                    await writer.wait_closed()
-                    self.blacklist.add(peer_info)
-                    return False
-
-                # Sign the peer's certificate and send your signature
-                peer_signature = self.sign_peer_certificate(ack_certificate)
-                signature_message = {
-                    "type": "certificate_signature",
-                    "server_id": self.server_id,
-                    "signature": peer_signature,
-                    "timestamp": time.time() + self.ntp_offset
-                }
-                await self.send_message(writer, signature_message)
-
-                # Calculate ping time
-                receive_time = time.time()
-                ping = receive_time - send_time
-
-                # Register the peer connection with all the required arguments
-                await self.register_peer_connection(
-                    reader, writer, peer_info, server_id, local_addr, local_port, bound_port, ack_message, ping
-                )
-
-                return True
-            else:
+            if ack_message.get("type") != "ack":
                 raise ValueError("Failed handshake: did not receive acknowledgment.")
+            server_id = ack_message.get("server_id")
+            ack_certificate = ack_message.get('certificate')
+
+            # Check for existing connection to this server_id
+            if server_id in self.active_peers:
+                logging.info(f"Already connected to server_id {server_id}. Closing new connection.")
+                writer.close()
+                await writer.wait_closed()
+                return False
+
+            # Verify the peer's certificate
+            if ack_certificate and self.verify_peer_certificate(ack_certificate):
+                # Add the peer's certificate to the trust store
+                self.trust_store[server_id] = {'certificate': ack_certificate, 'trusted': True}
+                logging.info(f"Trusted peer {server_id} added to trust store from ack message.")
+            else:
+                logging.warning(f"Failed to verify certificate from ack message of peer {server_id}. Closing connection.")
+                writer.close()
+                await writer.wait_closed()
+                self.blacklist.add(peer_info)
+                return False
+
+            # Sign the peer's certificate and send your signature
+            peer_signature = self.sign_peer_certificate(ack_certificate)
+            signature_message = {
+                "type": "certificate_signature",
+                "server_id": self.server_id,
+                "signature": peer_signature,
+                "timestamp": time.time() + self.ntp_offset
+            }
+            await self.send_message(writer, signature_message)
+
+            # Calculate ping time
+            receive_time = time.time()
+            ping = receive_time - send_time
+
+            # Register the peer connection with all the required arguments
+            await self.register_peer_connection(
+                reader, writer, peer_info, server_id, local_addr, local_port, bound_port, ack_message, ping
+            )
+
+            return True
         except Exception as e:
             logging.error(f"Error establishing connection to {peer_info}: {e}")
             return False
-
 
     async def connect_to_peer(self, host, port, max_retries=5):
         peer_info = f"{host}:{port}"
@@ -582,10 +593,7 @@ class Peer:
             logging.warning(f"Peer {peer_info} is blacklisted. Aborting connection.")
             return
 
-        if peer_info in self.active_peers:
-            logging.info(f"Already connected to peer: {peer_info}")
-            return
-
+        # Initialize connection attempts
         self.connection_attempts[peer_info] = self.connection_attempts.get(peer_info, 0)
 
         while self.connection_attempts[peer_info] < max_retries:
@@ -596,10 +604,9 @@ class Peer:
             try:
                 logging.info(f"Attempting to connect to peer: {peer_info}")
                 # Set a timeout for the connection attempt
-                timeout_duration = 10  # seconds
+                timeout_duration = 10  # Adjust the timeout as needed
                 connect_coro = asyncio.open_connection(host, port)
                 reader, writer = await asyncio.wait_for(connect_coro, timeout=timeout_duration)
-
                 if await self.establish_peer_connection(reader, writer, host, port, peer_info):
                     logging.info(f"Successfully connected to peer: {peer_info}")
                     self.connection_attempts.pop(peer_info, None)
@@ -619,12 +626,10 @@ class Peer:
         self.blacklist.add(peer_info)
         self.connection_attempts.pop(peer_info, None)
 
-
     async def connect_to_known_peers(self):
         """Attempt to connect to known peers, skipping blacklisted peers."""
         available_peers = [
-            peer for peer in self.peers if peer not in self.active_peers
-            and peer not in self.peers_connecting and peer not in self.blacklist
+            peer for peer in self.peers if peer not in self.peers_connecting and peer not in self.blacklist
         ]
 
         logging.debug(f"Available peers to connect: {available_peers}")
@@ -649,65 +654,49 @@ class Peer:
         # Update active peers after connection attempts
         self.update_active_peers()
 
-    async def handle_disconnection(self, peer_info):
+    async def handle_disconnection(self, server_id):
         if self.shutdown_flag:
             return
 
-        for server_id, peer_data in self.active_peers.items():
-            if peer_data["addr"] == peer_info:
-                del self.active_peers[server_id]
-                logging.info(f"Removed {peer_info} from active peers due to disconnection or error.")
-                break
+        if server_id in self.active_peers:
+            del self.active_peers[server_id]
+            logging.info(f"Removed server_id {server_id} from active peers due to disconnection or error.")
 
+        if server_id in self.connections:
+            del self.connections[server_id]
+
+        if server_id in self.heartbeat_tasks:
+            task = self.heartbeat_tasks.pop(server_id)
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         self.update_active_peers()
         self.peers_changed = True
         await self.schedule_rewrite()
 
     async def handle_peer_connection(self, reader, writer):
-        peer_address = writer.get_extra_info('peername')
-        peer_info = f"{peer_address[0]}:{peer_address[1]}"
-
-        if peer_info in self.connections:
-            logging.info(f"Duplicate connection attempt to {peer_info}. Closing new connection.")
-            writer.close()
-            await writer.wait_closed()
-            return
-
-        self.connections[peer_info] = (reader, writer)
-
         try:
-            buffer = b''
-            while True:
-                data = await reader.read(1024)
-                if not data:
-                    break
-
-                buffer += data
-                while b'\n' in buffer:
-                    message, buffer = buffer.split(b'\n', 1)
-                    try:
-                        if message:
-                            message_obj = json.loads(message.decode('utf-8').strip())
-                            await self.process_message(message_obj, writer)
-                    except UnicodeDecodeError as e:
-                        logging.error(f"Failed to decode message from {peer_info}: {e}")
-                    except json.JSONDecodeError as e:
-                        logging.error(f"Failed to parse JSON message from {peer_info}: {e}")
-
-        except asyncio.CancelledError:
-            logging.info(f"Connection task with {peer_address} cancelled")
-        except ConnectionResetError:
-            logging.warning(f"Connection reset by peer {peer_address}.")
-        except (asyncio.IncompleteReadError, json.JSONDecodeError):
-            logging.warning(f"Connection with {peer_address} closed abruptly or received malformed data.")
-        except Exception as e:
-            logging.exception(f"General error during P2P communication with {peer_address}: {e}")
-        finally:
-            if not writer.is_closing():
+            # Receive the first message
+            message = await self.receive_message(reader)
+            if message.get("type") == "hello":
+                peer_server_id = message.get("server_id")
+                # Check for existing connection to this server_id
+                if peer_server_id in self.active_peers:
+                    logging.info(f"Already connected to server_id {peer_server_id}. Closing new incoming connection.")
+                    writer.close()
+                    await writer.wait_closed()
+                    return
+                # Proceed to handle the hello message
+                await self.handle_hello_message(message, writer)
+            else:
+                logging.warning("First message was not a hello message. Closing connection.")
                 writer.close()
                 await writer.wait_closed()
-            logging.info(f"Connection with {peer_address} closed.")
-            await self.handle_disconnection(peer_info)
+        except Exception as e:
+            logging.error(f"Error handling peer connection: {e}")
+            writer.close()
+            await writer.wait_closed()
 
     async def close_p2p_server(self):
         if self.p2p_server:
@@ -876,19 +865,22 @@ class Peer:
         self.peers = {peer_info: last_seen for peer_info, last_seen in self.peers.items() if last_seen != 0}
         self.peers_changed = True
         await self.rewrite_peers_file()
-        await asyncio.gather(*[self.close_connection(*peer.split(':')) for peer in self.connections.keys()])
+        await asyncio.gather(*[self.close_connection_by_server_id(server_id) for server_id in self.connections.keys()])
 
-    async def close_connection(self, host, port):
-        if (host, port) in self.connections:
-            _, writer = self.connections.pop((host, port))
+    async def close_connection_by_server_id(self, server_id):
+        if server_id in self.connections:
+            _, writer = self.connections.pop(server_id)
             if writer and not writer.is_closing():
                 writer.close()
                 await writer.wait_closed()
-            logging.info(f"Successfully closed connection to {host}:{port}")
+            logging.info(f"Successfully closed connection to server_id {server_id}")
 
-    async def reconnect_to_peer(self, host, port):
-        peer_info = f"{host}:{port}"
-        await self._attempt_reconnect(peer_info)
+    async def reconnect_to_peer_by_server_id(self, server_id):
+        if peer_info := self.active_peers.get(server_id, {}).get('addr'):
+            host, port = peer_info.split(':')
+            await self._attempt_reconnect(peer_info)
+        else:
+            logging.info(f"No peer info found for server_id {server_id}. Cannot reconnect.")
 
     async def _attempt_reconnect(self, peer_info):
         logging.info(f"Attempting to reconnect to {peer_info}")
@@ -993,7 +985,7 @@ class Peer:
         # For initial trust, accept valid self-signed certificates
         logging.info(f"Peer {peer_server_id} has a valid self-signature. Accepting for initial trust.")
         return True
-    
+
     def sign_peer_certificate(self, peer_certificate):
         """Sign a peer's certificate with the local private key."""
         peer_server_id = peer_certificate['server_id']
@@ -1020,7 +1012,6 @@ class Peer:
             self.save_certificate()
         else:
             logging.info(f"Already have signature from peer {peer_server_id}.")
-
 
     def save_certificate(self):
         """Save the peer's own certificate to disk."""
@@ -1117,11 +1108,11 @@ class Peer:
         self.heartbeat_tasks.clear()
 
         # Close all peer connections
-        for peer_info, (reader, writer) in self.connections.items():
+        for server_id, (reader, writer) in self.connections.items():
             if not writer.is_closing():
                 writer.close()
                 await writer.wait_closed()
-                logging.info(f"Connection with {peer_info} closed during shutdown.")
+                logging.info(f"Connection with server_id {server_id} closed during shutdown.")
         self.connections.clear()
 
         # Close the P2P server

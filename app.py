@@ -1,8 +1,6 @@
-# Copyright 2024 Cronas.org
 # app.py
 
 import asyncio
-import contextlib
 import os
 import uuid
 import string
@@ -29,8 +27,11 @@ def get_mac_address():
     interfaces = netifaces.interfaces()
     for interface in interfaces:
         addresses = netifaces.ifaddresses(interface)
-        if mac_address_info := addresses.get(netifaces.AF_LINK):
-            return mac_address_info[0]['addr']
+        if netifaces.AF_LINK in addresses:
+            if mac_address_info := addresses[netifaces.AF_LINK]:
+                mac_address = mac_address_info[0]['addr']
+                if mac_address and mac_address != '00:00:00:00:00:00':
+                    return mac_address
     return None
 
 def generate_uuid_from_mac_and_ip(mac_address, ip_address):
@@ -116,7 +117,7 @@ def load_config(config_path='cronas.conf'):
     default_config = {
         'rpc_port': '4334',
         'p2p_port': '4333',
-        'maxpeers': 10,
+        'maxpeers': '10',
         'addnode': ['137.184.80.215:4333'],
         'rpc_password': generate_password(),
         'debug': 'false',
@@ -145,31 +146,22 @@ async def shutdown(peer, rpc_server):
     try:
         await peer.shutdown()
     except Exception as e:
-        logging.error(f"Error shutting down Peer: {e}")
+        logging.error(f"Error shutting down Peer: {e}", exc_info=True)
     
     try:
         await rpc_server.close_rpc_server()
     except Exception as e:
-        logging.error(f"Error closing RPC server: {e}")
+        logging.error(f"Error closing RPC server: {e}", exc_info=True)
     
     logging.info("Shutdown complete.")
-
-
-async def cancel_remaining_tasks():
-    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    logging.info(f"Cancelling {len(tasks)} remaining tasks...")
-    for task in tasks:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
 
 async def main(config_path):
     config = load_config(config_path)
     server_id = config.get('server_id')
     rpc_password = config.get('rpc_password')
-    rpc_port = int(config.get('rpc_port', 4334))
-    p2p_port = int(config.get('p2p_port', 4333))
-    max_peers = int(config.get('maxpeers', 10))
+    rpc_port = int(config.get('rpc_port', '4334'))
+    p2p_port = int(config.get('p2p_port', '4333'))
+    max_peers = int(config.get('maxpeers', '10'))
 
     peer = Peer('0.0.0.0', p2p_port, server_id, version, max_peers, config=config)
 
@@ -185,7 +177,7 @@ async def main(config_path):
         logging.info("Shutdown initiated by user.")
         await shutdown(peer, rpc_server)
     except Exception as e:
-        logging.error(f"Error during execution: {e}")
+        logging.error(f"Error during execution: {e}", exc_info=True)
         await shutdown(peer, rpc_server)
     finally:
         if not peer.shutdown_flag:
