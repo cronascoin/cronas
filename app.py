@@ -21,10 +21,7 @@ def generate_password(length=12):
 
 def get_short_commit_hash():
     result = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if result.returncode == 0:
-        return result.stdout.strip()
-    else:
-        return 'unknown'  # Handle case where Git command fails
+    return result.stdout.strip() if result.returncode == 0 else 'unknown'
 
 version = f'0.0.1-{get_short_commit_hash()}'
 

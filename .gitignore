@@ -4,3 +4,4 @@ irc_bot.log
 irclient.py
 settings.json
 cronas.conf
+my_certificate.json

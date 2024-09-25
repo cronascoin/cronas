@@ -81,6 +81,9 @@ class Peer:
         self.last_peer_list_request = {}
         self.start_time = datetime.datetime.now()
         self.ntp_offset = self.get_ntp_offset()
+        self.load_key_pair() 
+        self.load_certificate()  # Load or generate own certificate
+        self.load_trust_store()  # Load the trust store
 
         # Set the logging level based on the configuration
         log_level = self.config.get('log_level', 'INFO').upper()
@@ -93,11 +96,19 @@ class Peer:
 
     def generate_self_signed_certificate(self):
         """Generates a self-signed certificate."""
+        public_key_pem = self.key_pair.publickey().export_key().decode()
+        cert_data = json.dumps({
+            'server_id': self.server_id,
+            'public_key': public_key_pem,
+        }).encode()
+        h = SHA256.new(cert_data)
+        signature = pkcs1_15.new(self.key_pair).sign(h)
         return {
             'server_id': self.server_id,
-            'public_key': self.key_pair.publickey().export_key().decode(),
-            'signature': None,  # No signature, self-signed
+            'public_key': public_key_pem,
+            'signatures': {self.server_id: base64.b64encode(signature).decode()},
         }
+
 
     def get_ntp_offset(self):
         try:
@@ -196,13 +207,13 @@ class Peer:
         hello_message = {
             'type': 'hello',
             'server_id': self.server_id,
-            'public_key': self.key_pair.publickey().export_key().decode(),  # Send public key
-            'certificate': self.certificate,
+            'certificate': self.certificate,  # Include your certificate
             'timestamp': time.time() + self.ntp_offset
         }
         send_time = time.time()
         await self.send_message(writer, hello_message)
         return send_time
+
 
     async def receive_message(self, reader):
         data = await reader.readuntil(separator=b'\n')
@@ -213,46 +224,64 @@ class Peer:
             "type": "ack",
             "version": version,
             "server_id": server_id,
+            "certificate": self.certificate,  # Include your certificate
             "timestamp": time.time() + self.ntp_offset
         }
         await self.send_message(writer, ack_message)
         logging.info(f"Sent ack message to peer with server_id: {server_id}")
 
+
     async def handle_hello_message(self, message, writer):
-        """Handle hello message, including verifying the peer's certificate."""
+        """Handle hello message and verify the peer's certificate."""
         peer_certificate = message['certificate']
-        peer_server_id = message['server_id']
+        peer_server_id = peer_certificate['server_id']
         peer_info = f"{writer.get_extra_info('peername')[0]}:{writer.get_extra_info('peername')[1]}"
 
-        # Verify if the certificate is trusted (signed by known peers)
-        if peer_server_id in self.trust_store:
-            peer_trusted = self.trust_store[peer_server_id]['trusted']
-        else:
-            peer_trusted = self.verify_trust(peer_certificate)
-
-        if peer_trusted:
+        # Verify the peer's certificate
+        if self.verify_peer_certificate(peer_certificate):
+            # Add the peer's certificate to the trust store
             self.trust_store[peer_server_id] = {'certificate': peer_certificate, 'trusted': True}
             logging.info(f"Trusted peer {peer_server_id} connection established.")
+            self.trust_store[peer_server_id] = {'certificate': peer_certificate, 'trusted': True}
+            logging.info(f"Trusted peer {peer_server_id} added to trust store.")
+            self.save_trust_store()  # Save the updated trust store
         else:
-            if peer_info not in self.blacklist:
-                logging.warning(f"Untrusted peer {peer_server_id} attempting connection. Blacklisting.")
-                self.blacklist.add(peer_info)
+            logging.warning(f"Untrusted peer {peer_server_id} attempting connection. Blacklisting.")
+            self.blacklist.add(peer_info)
             writer.close()
             await writer.wait_closed()
             return  # Terminate the connection
 
-        # Continue with the rest of the handshake process if trusted
+        # Continue with the handshake
         await self.send_ack_message(writer, self.version, self.server_id)
 
+
     async def handle_ack_message(self, message, writer):
+        """Handle ack message and verify the peer's certificate."""
         addr = writer.get_extra_info('peername')
         peer_info = f"{addr[0]}:{addr[1]}"
         remote_version = message.get("version", "unknown")
         remote_server_id = message.get("server_id", "unknown")
+        ack_certificate = message.get('certificate')
+
         local_addr, local_port = writer.get_extra_info('sockname')
 
         addrlocal = f"{self.external_ip}:{local_port}"
         addrbind = f"{self.external_ip}:{local_port}"
+
+        # Verify the peer's certificate
+        if ack_certificate and self.verify_peer_certificate(ack_certificate):
+            # Add the peer's certificate to the trust store
+            self.trust_store[remote_server_id] = {'certificate': ack_certificate, 'trusted': True}
+            logging.info(f"Trusted peer {remote_server_id} added to trust store from ack message.")
+            self.trust_store[remote_server_id] = {'certificate': ack_certificate, 'trusted': True}
+            logging.info(f"Trusted peer {remote_server_id} added to trust store from ack message.")
+            self.save_trust_store()  # Save the updated trust store
+        else:
+            logging.warning(f"Failed to verify certificate from ack message of peer {remote_server_id}.")
+            writer.close()
+            await writer.wait_closed()
+            return  # Terminate the connection
 
         if remote_server_id in self.active_peers:
             logging.info(f"Duplicate connection detected for server_id {remote_server_id}. Closing new connection.")
@@ -278,6 +307,8 @@ class Peer:
         self.update_active_peers()
         self.mark_peer_changed()
         await self.schedule_rewrite()
+
+        # Start sending heartbeat
         asyncio.create_task(self.send_heartbeat(writer, remote_server_id))
 
     async def handle_peer_list_message(self, message):
@@ -429,6 +460,8 @@ class Peer:
             await self.respond_to_heartbeat(writer, message)
         elif message_type == "peer_list":
             await self.handle_peer_list_message(message)
+        elif message_type == "certificate_signature":
+            await self.handle_certificate_signature(message)
 
     async def listen_for_messages(self, reader, writer):
         addr = writer.get_extra_info('peername')
@@ -497,14 +530,29 @@ class Peer:
             # If the handshake is successful (received ack), process the connection
             if ack_message.get("type") == "ack":
                 server_id = ack_message.get("server_id")
+                ack_certificate = ack_message.get('certificate')
 
-                # Check if the peer is trusted before proceeding
-                if server_id not in self.trust_store or not self.trust_store[server_id]['trusted']:
-                    logging.warning(f"Untrusted peer {server_id}. Closing connection.")
+                # Verify the peer's certificate
+                if ack_certificate and self.verify_peer_certificate(ack_certificate):
+                    # Add the peer's certificate to the trust store
+                    self.trust_store[server_id] = {'certificate': ack_certificate, 'trusted': True}
+                    logging.info(f"Trusted peer {server_id} added to trust store from ack message.")
+                else:
+                    logging.warning(f"Failed to verify certificate from ack message of peer {server_id}. Closing connection.")
                     writer.close()
                     await writer.wait_closed()
                     self.blacklist.add(peer_info)
                     return False
+
+                # Sign the peer's certificate and send your signature
+                peer_signature = self.sign_peer_certificate(ack_certificate)
+                signature_message = {
+                    "type": "certificate_signature",
+                    "server_id": self.server_id,
+                    "signature": peer_signature,
+                    "timestamp": time.time() + self.ntp_offset
+                }
+                await self.send_message(writer, signature_message)
 
                 # Calculate ping time
                 receive_time = time.time()
@@ -521,6 +569,7 @@ class Peer:
         except Exception as e:
             logging.error(f"Error establishing connection to {peer_info}: {e}")
             return False
+
 
     async def connect_to_peer(self, host, port, max_retries=5):
         """Connect to a peer, skipping if they are blacklisted."""
@@ -885,3 +934,155 @@ class Peer:
                 self.active_peers[server_id]["lastseen"] = int(time.time())
                 self.peers_changed = True
                 await self.schedule_rewrite()
+
+    def verify_peer_certificate(self, peer_certificate):
+        """Verify the peer's certificate based on the Web of Trust."""
+        peer_server_id = peer_certificate['server_id']
+        peer_public_key_pem = peer_certificate['public_key']
+        peer_public_key = RSA.import_key(peer_public_key_pem)
+        signatures = peer_certificate.get('signatures', {})
+
+        # Verify the self-signature
+        cert_data = json.dumps({
+            'server_id': peer_server_id,
+            'public_key': peer_public_key_pem,
+        }).encode()
+        h = SHA256.new(cert_data)
+
+        # Check if the peer has signed their own certificate
+        self_signature_b64 = signatures.get(peer_server_id)
+        if not self_signature_b64:
+            logging.warning(f"Peer {peer_server_id} has no self-signature.")
+            return False
+
+        try:
+            self_signature = base64.b64decode(self_signature_b64)
+            pkcs1_15.new(peer_public_key).verify(h, self_signature)
+        except (ValueError, TypeError):
+            logging.warning(f"Invalid self-signature for peer {peer_server_id}.")
+            return False
+
+        # Check if any trusted peer has signed this certificate
+        for trusted_peer_id, trusted_peer in self.trust_store.items():
+            if trusted_peer_id == peer_server_id:
+                continue  # Skip self
+            trusted_certificate = trusted_peer['certificate']
+            trusted_public_key_pem = trusted_certificate['public_key']
+            trusted_public_key = RSA.import_key(trusted_public_key_pem)
+            if signature_b64 := signatures.get(trusted_peer_id):
+                try:
+                    signature = base64.b64decode(signature_b64)
+                    pkcs1_15.new(trusted_public_key).verify(h, signature)
+                    logging.info(f"Peer {peer_server_id} is trusted via {trusted_peer_id}.")
+                    return True
+                except (ValueError, TypeError):
+                    continue  # Invalid signature, try next
+
+        # For initial trust, accept valid self-signed certificates
+        logging.info(f"Peer {peer_server_id} has a valid self-signature. Accepting for initial trust.")
+        return True
+    
+    def sign_peer_certificate(self, peer_certificate):
+        """Sign a peer's certificate with the local private key."""
+        peer_server_id = peer_certificate['server_id']
+        peer_public_key_pem = peer_certificate['public_key']
+        cert_data = json.dumps({
+            'server_id': peer_server_id,
+            'public_key': peer_public_key_pem,
+        }).encode()
+        h = SHA256.new(cert_data)
+        signature = pkcs1_15.new(self.key_pair).sign(h)
+        return base64.b64encode(signature).decode()
+
+    async def handle_certificate_signature(self, message):
+        """Handle incoming certificate signatures from peers."""
+        peer_server_id = message['server_id']
+        signature_b64 = message['signature']
+
+        # Add the signature to our certificate
+        if peer_server_id not in self.certificate['signatures']:
+            self.certificate['signatures'][peer_server_id] = signature_b64
+            logging.info(f"Added signature from peer {peer_server_id} to our certificate.")
+
+            # Save your updated certificate to disk
+            self.save_certificate()
+        else:
+            logging.info(f"Already have signature from peer {peer_server_id}.")
+
+
+    def save_certificate(self):
+        """Save the peer's own certificate to disk."""
+        try:
+            with open("my_certificate.json", "w") as f:
+                json.dump(self.certificate, f)
+            logging.info("Own certificate saved to disk.")
+        except Exception as e:
+            logging.error(f"Failed to save own certificate: {e}")
+
+    def load_certificate(self):
+        """Load the peer's own certificate from disk."""
+        if os.path.exists("my_certificate.json"):
+            try:
+                with open("my_certificate.json", "r") as f:
+                    self.certificate = json.load(f)
+                logging.info("Own certificate loaded from disk.")
+            except Exception as e:
+                logging.error(f"Failed to load own certificate: {e}")
+                # If loading fails, generate a new certificate
+                self.certificate = self.generate_self_signed_certificate()
+                self.save_certificate()
+        else:
+            # If the certificate file doesn't exist, generate and save a new one
+            self.certificate = self.generate_self_signed_certificate()
+            self.save_certificate()
+
+    def save_trust_store(self):
+        """Save the trust store to disk."""
+        try:
+            with open("trust_store.json", "w") as f:
+                json.dump(self.trust_store, f)
+            logging.info("Trust store saved to disk.")
+        except Exception as e:
+            logging.error(f"Failed to save trust store: {e}")
+
+    def load_trust_store(self):
+        """Load the trust store from disk."""
+        if os.path.exists("trust_store.json"):
+            try:
+                with open("trust_store.json", "r") as f:
+                    self.trust_store = json.load(f)
+                logging.info("Trust store loaded from disk.")
+            except Exception as e:
+                logging.error(f"Failed to load trust store: {e}")
+                self.trust_store = {}
+        else:
+            self.trust_store = {}
+            logging.info("No existing trust store found. Starting with an empty trust store.")
+
+    def save_key_pair(self):
+        """Save the RSA key pair to disk."""
+        try:
+            private_key_pem = self.key_pair.export_key(format='PEM').decode()
+            with open("private_key.pem", "w") as f:
+                f.write(private_key_pem)
+            logging.info("Private key saved to disk.")
+        except Exception as e:
+            logging.error(f"Failed to save private key: {e}")
+
+    def load_key_pair(self):
+        """Load the RSA key pair from disk or generate a new one."""
+        if os.path.exists("private_key.pem"):
+            try:
+                with open("private_key.pem", "r") as f:
+                    private_key_pem = f.read()
+                self.key_pair = RSA.import_key(private_key_pem)
+                logging.info("Private key loaded from disk.")
+            except Exception as e:
+                logging.error(f"Failed to load private key: {e}")
+                # If loading fails, generate a new key pair
+                self.key_pair = self.generate_key_pair()
+                self.save_key_pair()
+        else:
+            # If the private key file doesn't exist, generate and save a new one
+            self.key_pair = self.generate_key_pair()
+            self.save_key_pair()
