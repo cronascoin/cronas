@@ -382,12 +382,11 @@ class Peer:
     async def send_peer_list(self, writer):
         logging.info("Attempting to send peer list...")
 
-        connecting_ports = [
+        if connecting_ports := [
             peer_data["addr"]
             for peer_data in self.active_peers.values()
             if self.is_valid_peer(peer_data["addr"])
-        ]
-        if connecting_ports:
+        ]:
             peer_list_message = {
                 "type": "peer_list",
                 "payload": connecting_ports,
