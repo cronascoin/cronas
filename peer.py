@@ -653,6 +653,7 @@ class Peer:
                     timeout_duration = 10  # Adjust the timeout as needed
                     connect_coro = asyncio.open_connection(host, port)
                     reader, writer = await asyncio.wait_for(connect_coro, timeout=timeout_duration)
+
                     if await self.establish_peer_connection(reader, writer, host, port, peer_info):
                         logging.info(f"Successfully connected to peer: {peer_info}")
                         async with self.connection_attempts_lock:
@@ -661,16 +662,19 @@ class Peer:
                 except asyncio.TimeoutError:
                     logging.warning(f"Connection attempt to {peer_info} timed out after {timeout_duration} seconds.")
                 except OSError as e:
-                    logging.warning(f"Connection to {peer_info} failed: {e}")
+                    # Improved error message with more context
+                    logging.warning(f"Failed to connect to peer {peer_info}: {e.strerror} (Errno {e.errno})")
                 except Exception as e:
                     logging.error(f"Unexpected error connecting to {peer_info}: {e}", exc_info=True)
                 finally:
+                    # Increment attempts and retry after a backoff
                     async with self.connection_attempts_lock:
-                        self.connection_attempts[peer_info] = self.connection_attempts.get(peer_info, 0) + 1
+                        self.connection_attempts[peer_info] += 1
                         attempts = self.connection_attempts[peer_info]
                     logging.info(f"Connection attempt {attempts} for {peer_info} failed.")
-                    await asyncio.sleep(attempts * 5)
+                    await asyncio.sleep(attempts * 5)  # Backoff before retrying
         finally:
+            # Remove from the connecting peers set
             async with self.peers_connecting_lock:
                 self.peers_connecting.discard(peer_info)
 
@@ -929,7 +933,7 @@ class Peer:
     async def _attempt_reconnect(self, peer_info):
         logging.info(f"Attempting to reconnect to {peer_info}")
 
-        retry_intervals = [60, 3600, 86400, 2592000]
+        retry_intervals = [60, 3600, 86400, 2592000]  # Retry intervals: 1 min, 1 hour, 1 day, 1 month
         attempt = 0
 
         while attempt < len(retry_intervals):
@@ -940,6 +944,7 @@ class Peer:
             async with self.peers_connecting_lock:
                 if peer_info not in self.active_peers and peer_info not in self.peers_connecting:
                     try:
+                        # Apply jitter to avoid simultaneous retries across multiple peers
                         jitter = random.uniform(0.8, 1.2)
                         backoff_time = retry_intervals[attempt] * jitter
                         logging.info(f"Scheduling reconnection attempt for {peer_info} in {backoff_time:.2f} seconds.")
@@ -948,15 +953,23 @@ class Peer:
                         host, port = peer_info.split(':')
                         await self.connect_to_peer(host, int(port))
 
+                        # If successfully reconnected, break out of the loop
                         if peer_info in self.active_peers:
-                            logging.info(f"Reconnected to {peer_info} successfully.")
-                            break
+                            logging.info(f"Successfully reconnected to {peer_info}.")
+                            return  # Exit the function after a successful reconnection
                     except Exception as e:
-                        logging.error(f"Reconnection attempt {attempt} to {peer_info} failed: {e}")
-                        attempt += 1
+                        logging.error(f"Reconnection attempt {attempt + 1} to {peer_info} failed: {e}")
+                        attempt += 1  # Increment attempt on failure
+
                 else:
-                    logging.info(f"{peer_info} is already active or attempting to reconnect.")
-                    break
+                    logging.info(f"{peer_info} is already active or attempting to reconnect. Skipping reconnection.")
+                    return  # Exit if already connected or connecting
+
+            # Increment attempt if peer is not already active and connection failed
+            attempt += 1
+
+        logging.warning(f"Exhausted all reconnection attempts for {peer_info}.")
+
 
     async def request_peer_list(self, writer, peer_info):
         current_time = time.time()
