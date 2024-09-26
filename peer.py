@@ -615,10 +615,12 @@ class Peer:
         peer_info = f"{host}:{port}"
 
         async with self.peers_connecting_lock:
-            if peer_info in self.blacklist:
-                logging.warning(f"Peer {peer_info} is blacklisted. Aborting connection.")
+            # Check if already connected
+            if any(peer_info == peer['addr'] for peer in self.active_peers.values()):
+                logging.info(f"Already connected to {peer_info}, skipping connection attempt.")
                 return
 
+            # Check if we are already trying to connect
             if peer_info in self.peers_connecting:
                 logging.info(f"Already connecting to {peer_info}, skipping.")
                 return
@@ -648,7 +650,6 @@ class Peer:
 
                 try:
                     logging.info(f"Attempting to connect to peer: {peer_info}")
-                    # Set a timeout for the connection attempt
                     timeout_duration = 10  # Adjust the timeout as needed
                     connect_coro = asyncio.open_connection(host, port)
                     reader, writer = await asyncio.wait_for(connect_coro, timeout=timeout_duration)
@@ -664,7 +665,6 @@ class Peer:
                 except Exception as e:
                     logging.error(f"Unexpected error connecting to {peer_info}: {e}", exc_info=True)
                 finally:
-                    # Safely increment connection attempts inside lock
                     async with self.connection_attempts_lock:
                         self.connection_attempts[peer_info] = self.connection_attempts.get(peer_info, 0) + 1
                         attempts = self.connection_attempts[peer_info]
@@ -673,6 +673,7 @@ class Peer:
         finally:
             async with self.peers_connecting_lock:
                 self.peers_connecting.discard(peer_info)
+
 
     async def connect_to_known_peers(self):
         """Attempt to connect to known peers, skipping blacklisted peers."""

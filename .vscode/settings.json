@@ -24,6 +24,7 @@
         "peername",
         "pkcs",
         "publickey",
+        "pycryptodome",
         "pystun",
         "REUSEADDR",
         "REUSEPORT",
