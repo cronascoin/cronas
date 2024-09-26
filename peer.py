@@ -334,33 +334,32 @@ class Peer:
         new_peers = message.get("payload", [])
         logging.info(f"Received peer list: {new_peers}")
 
-        valid_new_peers = {
-            peer_info: self.peers.get(peer_info, 0)  # Do not update lastseen, retain previous timestamp
-            for peer_info in new_peers
-            if self.is_valid_peer(peer_info)
-        }
+        valid_new_peers = {}
+        invalid_peers = []
 
-        invalid_peers = [
-            peer_info for peer_info in new_peers
-            if not self.is_valid_peer(peer_info)
-        ]
+        for peer_info in new_peers:
+            if self.is_valid_peer(peer_info):
+                # Check for self-peer and log only once
+                if peer_info == f"{self.host}:{self.p2p_port}":
+                    logging.info(f"Skipping self-peer: {peer_info}")
+                    continue  # Skip adding self-peer to valid_new_peers
+                valid_new_peers[peer_info] = int(time.time())
+            else:
+                invalid_peers.append(peer_info)
 
-        for invalid_peer in invalid_peers:
-            if self.debug:
+        # Log invalid peers if debugging
+        if self.debug:
+            for invalid_peer in invalid_peers:
                 logging.warning(f"Invalid peer received: {invalid_peer}")
 
-        # Update peers list without changing lastseen
-        self.peers.update(valid_new_peers)
+        # Update peers and schedule file rewrite
         if valid_new_peers:
+            self.peers.update(valid_new_peers)
             self.peers_changed = True
             await self.schedule_rewrite()
 
-        # Attempt to connect to valid new peers
+        # Try connecting to valid new peers, excluding the self-peer
         for peer_info in valid_new_peers:
-            if peer_info == f"{self.host}:{self.p2p_port}":
-                logging.info(f"Skipping self-peer: {peer_info}")
-                continue
-
             async with self.connection_attempts_lock, self.peers_connecting_lock:
                 if peer_info in self.connections:
                     if self.debug:
@@ -376,6 +375,7 @@ class Peer:
             port = int(port)
             asyncio.create_task(self.connect_to_peer(host, port, 5))
 
+        # Update active peers after connecting
         self.update_active_peers()
 
 
