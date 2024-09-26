@@ -335,7 +335,8 @@ class Peer:
         logging.info(f"Received peer list: {new_peers}")
 
         valid_new_peers = {
-            peer_info: int(time.time()) for peer_info in new_peers
+            peer_info: self.peers.get(peer_info, 0)  # Do not update lastseen, retain previous timestamp
+            for peer_info in new_peers
             if self.is_valid_peer(peer_info)
         }
 
@@ -348,11 +349,13 @@ class Peer:
             if self.debug:
                 logging.warning(f"Invalid peer received: {invalid_peer}")
 
+        # Update peers list without changing lastseen
         self.peers.update(valid_new_peers)
         if valid_new_peers:
             self.peers_changed = True
             await self.schedule_rewrite()
 
+        # Attempt to connect to valid new peers
         for peer_info in valid_new_peers:
             if peer_info == f"{self.host}:{self.p2p_port}":
                 logging.info(f"Skipping self-peer: {peer_info}")
@@ -375,16 +378,26 @@ class Peer:
 
         self.update_active_peers()
 
+
     async def respond_to_heartbeat(self, writer, message):
-        writer.get_extra_info('peername')
+        addr = writer.get_extra_info('peername')
+        peer_info = f"{addr[0]}:{addr[1]}"
         peer_server_id = message.get('server_id')
 
+        # Update the lastseen for the peer in active peers
         if peer_server_id in self.active_peers:
             self.active_peers[peer_server_id]['lastseen'] = int(time.time())
-            self.peers_changed = True
-            if self.debug:
-                logging.info(f"Updated last seen for {peer_server_id}")
+            self.peers_changed = True  # Mark peers as changed for later rewriting
 
+            # Also update lastseen in the self.peers dictionary to be saved to peers.dat
+            if peer_info in self.peers:
+                self.peers[peer_info] = int(time.time())
+                logging.debug(f"Updated last seen for {peer_server_id} in peers.dat.")
+
+            # Schedule a rewrite to save peers.dat with updated lastseen
+            await self.schedule_rewrite()
+
+        # Send back an acknowledgment for the heartbeat
         ack_message = {
             "type": "heartbeat_ack",
             "payload": "pong",
@@ -394,6 +407,7 @@ class Peer:
         await self.send_message(writer, ack_message)
         if self.debug:
             logging.info(f"Sent heartbeat acknowledgment to {peer_server_id}.")
+
 
     async def send_peer_list(self, writer):
         logging.info("Attempting to send peer list...")
@@ -429,7 +443,7 @@ class Peer:
 
                 try:
                     await self.send_message(writer, heartbeat_msg)
-                    logging.info(f"Heartbeat sent to {server_id}")
+                    logging.debug(f"Heartbeat sent to {server_id}")
 
                     # Sleep in small increments to allow for quick shutdown
                     total_sleep = 0
@@ -524,7 +538,7 @@ class Peer:
             'addrbind': f"{self.external_ip}:{bound_port}",
             'server_id': server_id,
             'version': version,
-            'lastseen': int(time.time()),
+            'lastseen': int(time.time()),  # Only update lastseen upon actual connection
             'ping': round(ping, 3),
         }
         self.peers_changed = True
@@ -535,6 +549,7 @@ class Peer:
 
         # Request peer list from the connected peer
         await self.request_peer_list(writer, peer_info)
+
 
     async def establish_peer_connection(self, reader, writer, host, port, peer_info):
         """Establish the connection and verify trust using certificates."""
@@ -617,7 +632,7 @@ class Peer:
         async with self.peers_connecting_lock:
             # Check if already connected
             if any(peer_info == peer['addr'] for peer in self.active_peers.values()):
-                logging.info(f"Already connected to {peer_info}, skipping connection attempt.")
+                logging.debug(f"Already connected to {peer_info}, skipping connection attempt.")
                 return
 
             # Check if we are already trying to connect
@@ -653,7 +668,6 @@ class Peer:
                     timeout_duration = 10  # Adjust the timeout as needed
                     connect_coro = asyncio.open_connection(host, port)
                     reader, writer = await asyncio.wait_for(connect_coro, timeout=timeout_duration)
-
                     if await self.establish_peer_connection(reader, writer, host, port, peer_info):
                         logging.info(f"Successfully connected to peer: {peer_info}")
                         async with self.connection_attempts_lock:
@@ -662,28 +676,28 @@ class Peer:
                 except asyncio.TimeoutError:
                     logging.warning(f"Connection attempt to {peer_info} timed out after {timeout_duration} seconds.")
                 except OSError as e:
-                    # Improved error message with more context
                     logging.warning(f"Failed to connect to peer {peer_info}: {e.strerror} (Errno {e.errno})")
                 except Exception as e:
                     logging.error(f"Unexpected error connecting to {peer_info}: {e}", exc_info=True)
                 finally:
-                    # Increment attempts and retry after a backoff
                     async with self.connection_attempts_lock:
-                        self.connection_attempts[peer_info] += 1
+                        self.connection_attempts[peer_info] = self.connection_attempts.get(peer_info, 0) + 1
                         attempts = self.connection_attempts[peer_info]
                     logging.info(f"Connection attempt {attempts} for {peer_info} failed.")
-                    await asyncio.sleep(attempts * 5)  # Backoff before retrying
+                    await asyncio.sleep(attempts * 5)
         finally:
-            # Remove from the connecting peers set
             async with self.peers_connecting_lock:
                 self.peers_connecting.discard(peer_info)
 
 
     async def connect_to_known_peers(self):
-        """Attempt to connect to known peers, skipping blacklisted peers."""
+        """Attempt to connect to known peers, skipping blacklisted or already connected peers."""
         async with self.peers_connecting_lock:
             available_peers = [
-                peer for peer in self.peers if peer not in self.peers_connecting and peer not in self.blacklist
+                peer for peer in self.peers
+                if peer not in self.peers_connecting and 
+                peer not in self.blacklist and 
+                peer not in self.active_peers  # Skip already connected peers
             ]
 
         logging.debug(f"Available peers to connect: {available_peers}")
@@ -701,6 +715,7 @@ class Peer:
 
         # Update active peers after connection attempts
         self.update_active_peers()
+
 
     async def handle_disconnection(self, server_id):
         if self.shutdown_flag:
@@ -887,27 +902,36 @@ class Peer:
             await self.rewrite_peers_file()
 
     async def rewrite_peers_file(self):
-        """Write the peer data to the peers.dat file."""
+        """Write the peer data to the peers.dat file, sorted by lastseen in descending order."""
         if not self.peers_changed:
             return
 
         async with self.file_lock:
             try:
-                valid_peers = {
+                # Filter valid peers and sort them by lastseen in descending order
+                sorted_peers = {
                     peer_info: last_seen
-                    for peer_info, last_seen in self.peers.items()
+                    for peer_info, last_seen in sorted(
+                        self.peers.items(),
+                        key=lambda item: item[1],  # Sort by lastseen
+                        reverse=True  # Descending order
+                    )
                     if self.is_valid_peer(peer_info) and last_seen != 0
                 }
+
+                # Write sorted peers to the file
                 async with aiofiles.open("peers.dat", "w") as f:
-                    for peer_info, last_seen in valid_peers.items():
+                    for peer_info, last_seen in sorted_peers.items():
                         await f.write(f"{peer_info}:{last_seen}\n")
+
                 self.peers_changed = False
                 if self.debug:
-                    logging.info("Peers file rewritten successfully.")
+                    logging.info("Peers file rewritten successfully with sorted peers based on last seen.")
             except OSError as e:
                 logging.error(f"Failed to open peers.dat: {e}")
             except Exception as e:
                 logging.error(f"Failed to rewrite peers.dat: {e}")
+
 
     async def cleanup_and_rewrite_peers(self):
         self.peers = {peer_info: last_seen for peer_info, last_seen in self.peers.items() if last_seen != 0}
