@@ -684,7 +684,7 @@ class Peer:
                         self.connection_attempts[peer_info] = self.connection_attempts.get(peer_info, 0) + 1
                         attempts = self.connection_attempts[peer_info]
                     logging.info(f"Connection attempt {attempts} for {peer_info} failed.")
-                    await asyncio.sleep(attempts * 5)
+                    await asyncio.sleep(attempts * 60)
         finally:
             async with self.peers_connecting_lock:
                 self.peers_connecting.discard(peer_info)
