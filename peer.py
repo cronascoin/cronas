@@ -635,7 +635,7 @@ class Peer:
             await writer.wait_closed()
             return False
 
-    async def connect_to_peer(self, host, port, max_retries=5):
+    async def connect_to_peer(self, host, port, max_retries=3):
         peer_info = f"{host}:{port}"
 
         # Preemptive blacklist check
