@@ -772,10 +772,25 @@ class Peer:
                 logging.warning("First message was not a hello message. Closing connection.")
                 writer.close()
                 await writer.wait_closed()
+        except ConnectionResetError as e:
+            logging.error(f"Connection reset by peer during handling: {e}")
+            # Attempt to close the writer gracefully
+            if not writer.is_closing():
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except ConnectionResetError:
+                    logging.debug("Writer was already closed by peer.")
         except Exception as e:
-            logging.error(f"Error handling peer connection: {e}")
-            writer.close()
-            await writer.wait_closed()
+            logging.error(f"Unexpected error handling peer connection: {e}")
+            # Attempt to close the writer gracefully
+            if not writer.is_closing():
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except ConnectionResetError:
+                    logging.debug("Writer was already closed by peer.")
+
 
     async def close_p2p_server(self):
         if self.p2p_server:
