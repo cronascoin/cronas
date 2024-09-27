@@ -336,21 +336,30 @@ class Peer:
 
         valid_new_peers = {}
         invalid_peers = []
+        blacklisted_peers = []
 
         for peer_info in new_peers:
-            if self.is_valid_peer(peer_info):
-                # Check for self-peer and log only once
-                if peer_info == f"{self.host}:{self.p2p_port}":
-                    logging.info(f"Skipping self-peer: {peer_info}")
-                    continue  # Skip adding self-peer to valid_new_peers
-                valid_new_peers[peer_info] = int(time.time())
-            else:
+            if not self.is_valid_peer(peer_info):
                 invalid_peers.append(peer_info)
+                continue  # Skip invalid peers
 
-        # Log invalid peers if debugging
+            if peer_info == f"{self.host}:{self.p2p_port}":
+                logging.info(f"Skipping self-peer: {peer_info}")
+                continue  # Skip adding self-peer to valid_new_peers
+
+            if peer_info in self.blacklist:
+                logging.info(f"Skipping blacklisted peer: {peer_info}")
+                blacklisted_peers.append(peer_info)
+                continue  # Skip adding blacklisted peers
+
+            valid_new_peers[peer_info] = int(time.time())
+
+        # Log invalid and blacklisted peers if debugging
         if self.debug:
             for invalid_peer in invalid_peers:
                 logging.warning(f"Invalid peer received: {invalid_peer}")
+            for blacklisted_peer in blacklisted_peers:
+                logging.warning(f"Blacklisted peer received and skipped: {blacklisted_peer}")
 
         # Update peers and schedule file rewrite
         if valid_new_peers:
@@ -358,7 +367,7 @@ class Peer:
             self.peers_changed = True
             await self.schedule_rewrite()
 
-        # Try connecting to valid new peers, excluding the self-peer
+        # Try connecting to valid new peers, excluding the self-peer and blacklisted peers
         for peer_info in valid_new_peers:
             async with self.connection_attempts_lock, self.peers_connecting_lock:
                 if peer_info in self.connections:
@@ -629,6 +638,12 @@ class Peer:
     async def connect_to_peer(self, host, port, max_retries=5):
         peer_info = f"{host}:{port}"
 
+        # Preemptive blacklist check
+        async with self.peers_connecting_lock:
+            if peer_info in self.blacklist:
+                logging.warning(f"Peer {peer_info} is blacklisted. Skipping connection attempt.")
+                return
+
         async with self.peers_connecting_lock:
             # Check if already connected
             if any(peer_info == peer['addr'] for peer in self.active_peers.values()):
@@ -659,6 +674,7 @@ class Peer:
                     logging.warning(f"Failed to connect to {host}:{port} after {max_retries} attempts. Blacklisting peer.")
                     async with self.peers_connecting_lock:
                         self.blacklist.add(peer_info)
+                        self.save_blacklist()  # Persist the blacklist
                     async with self.connection_attempts_lock:
                         self.connection_attempts.pop(peer_info, None)
                     return
@@ -688,7 +704,7 @@ class Peer:
         finally:
             async with self.peers_connecting_lock:
                 self.peers_connecting.discard(peer_info)
-
+                
 
     async def connect_to_known_peers(self):
         """Attempt to connect to known peers, skipping blacklisted or already connected peers."""
