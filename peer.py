@@ -709,11 +709,15 @@ class Peer:
     async def connect_to_known_peers(self):
         """Attempt to connect to known peers, skipping blacklisted or already connected peers."""
         async with self.peers_connecting_lock:
+            # Extract all connected peer_info strings from active_peers
+            connected_peer_infos = {peer_info for peer in self.active_peers.values() for peer_info in [peer['addr']]}
+            
+            # Now, filter out peers that are already connected, blacklisted, or currently connecting
             available_peers = [
                 peer for peer in self.peers
                 if peer not in self.peers_connecting and 
                 peer not in self.blacklist and 
-                peer not in self.active_peers  # Skip already connected peers
+                peer not in connected_peer_infos  # Correctly skip already connected peers
             ]
 
         logging.debug(f"Available peers to connect: {available_peers}")
