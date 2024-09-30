@@ -1,0 +1,6 @@
+# requirements.txt
+aiofiles
+cryptography
+pycryptodome
+stun
+ntplib
