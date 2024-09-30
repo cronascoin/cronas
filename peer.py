@@ -723,7 +723,7 @@ class Peer:
         logging.debug(f"Available peers to connect: {available_peers}")
 
         if not available_peers:
-            logging.info("No available peers to connect.")
+            #logging.info("No available peers to connect.")
             return
 
         peers_to_connect = random.sample(available_peers, min(self.max_peers, len(available_peers)))

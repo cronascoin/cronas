@@ -4,6 +4,7 @@ import time
 from aiohttp import web
 import json
 import logging
+import base64
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -25,15 +26,29 @@ class RPCServer:
         return middleware_handler
 
     def check_auth(self, request):
-        if auth_info := request.headers.get('Authorization'):
-            provided_password = auth_info.split()[-1]  # Basic handling; improve as needed
-            return provided_password == self.rpc_password
-        return False
+        auth_header = request.headers.get('Authorization')
+        if not auth_header:
+            return False
+
+        try:
+            auth_type, credentials = auth_header.split(' ', 1)
+            if auth_type.lower() != 'basic':
+                return False
+            decoded_credentials = base64.b64decode(credentials).decode('utf-8')
+            username, password = decoded_credentials.split(':', 1)
+            return password == self.rpc_password
+        except (ValueError, base64.binascii.Error):
+            return False
 
     async def start_rpc_server(self):
         self.app.add_routes([
-            web.post('/addnode', self.add_node),  # Register the route for adding a node
-            web.get('/getpeerinfo', self.get_peer_info)     # Route to get active peers
+            web.post('/addnode', self.add_node),
+            web.get('/getpeerinfo', self.get_peer_info),
+            web.post('/sendmessage', self.send_message),
+            web.get('/getmessages', self.get_messages),
+            web.post('/transaction', self.handle_transaction),
+            web.get('/health', self.health_check),
+            # Add more routes as needed
         ])
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
@@ -53,12 +68,12 @@ class RPCServer:
             active_peers_list = [
                 {
                     "server_id": peer_details.get('server_id', 'unknown'),
-                    "version": peer_details.get('version', 'unknown'),  # Providing default if not present
+                    "version": peer_details.get('version', 'unknown'),
                     "addr": peer_details.get('addr', 'unknown'),
                     "addrlocal": peer_details.get('addrlocal', 'unknown'),
                     "addrbind": peer_details.get('addrbind', 'unknown'),
                     "lastseen": peer_details.get('lastseen', 'unknown'),
-                    "ping": f"{peer_details.get('ping', 'unknown'):.3f}" if isinstance(peer_details.get('ping'), (int, float)) else 'unknown'  # Limit ping to 3 decimal places
+                    "ping": f"{peer_details.get('ping', 'unknown'):.3f}" if isinstance(peer_details.get('ping'), (int, float)) else 'unknown'
                 }
                 for peer_details in self.peer.active_peers.values()
             ]
@@ -67,24 +82,22 @@ class RPCServer:
                 "connected_peers": active_peers_list
             }
             logging.debug(f"Prepared response for JSON serialization: {response}")
-            json_response = json.dumps(response)
-            logging.debug(f"Serialized JSON response: {json_response}")
-            return web.Response(text=json_response, content_type='application/json')
+            return web.json_response(response, status=200)
         except Exception as e:
             logging.error(f"Error fetching peer information: {e}")
-            return web.Response(status=500, text=json.dumps({"error": "Internal server error"}))
+            return web.json_response({"error": "Internal server error"}, status=500)
 
     async def add_node(self, request):
         try:
             data = await request.json()
 
             # More robust validation
-            required_fields = ['addr', 'listening_port']  # Adjusted required fields
-            if not all(field in data for field in required_fields):
-                return web.Response(status=400, text=json.dumps({"error": "Missing required fields"}))
+            required_fields = ['addr', 'listening_port']
+            if any(field not in data for field in required_fields):
+                return web.json_response({"error": "Missing required fields"}, status=400)
 
             addr = data['addr']
-            port = data['listening_port']  # Use listening_port directly
+            port = data['listening_port']
 
             # Input validation
             try:
@@ -92,28 +105,99 @@ class RPCServer:
                 if not isinstance(port, int) or not (1 <= port <= 65535):
                     raise ValueError("Invalid port number")
             except ValueError as e:
-                return web.Response(status=400, text=json.dumps({"error": str(e)}))
+                return web.json_response({"error": str(e)}, status=400)
 
             peer_info = f"{addr}:{port}"
 
-            # Check if peer already exists
-            if peer_info in self.peer.peers:
-                return web.Response(status=409, text=json.dumps({"error": "Peer already exists"}))
+            # Check if peer already exists in known peers or active peers
+            if peer_info in self.peer.peers or any(peer['addr'] == peer_info for peer in self.peer.active_peers.values()):
+                return web.json_response({"error": "Peer already exists"}, status=409)
 
             current_time = int(time.time())
             self.peer.peers[peer_info] = current_time  # Add to known peers
+            self.peer.peers_changed = True  # Mark peers as changed for persistence
+            await self.peer.schedule_rewrite()
 
-            # Trigger connection attempt (revised logic for directly adding to active_peers)
+            # Trigger connection attempt
             asyncio.create_task(self.peer.connect_to_peer(addr, port))
 
-            return web.Response(
-                text=json.dumps({"message": "Node connection initiated"}),  # Updated message
-                content_type='application/json'
-            )
+            return web.json_response({"message": "Node connection initiated"}, status=200)
         except json.JSONDecodeError:
-            return web.Response(status=400, text=json.dumps({"error": "Invalid JSON"}))
+            return web.json_response({"error": "Invalid JSON"}, status=400)
         except Exception as e:
             logging.error(f"Error adding node: {e}")
-            return web.Response(status=500, text=json.dumps({"error": "Internal server error"}))
+            return web.json_response({"error": "Internal server error"}, status=500)
 
-# Additional methods as needed
+    async def send_message(self, request):
+        try:
+            data = await request.json()
+            recipient_id = data.get('recipient_id')
+            content = data.get('content')
+
+            if not content:
+                return web.json_response({"error": "Message content cannot be empty."}, status=400)
+
+            if recipient_id:
+                # Send a direct message
+                success = await self.peer.send_message_to_peer(recipient_id, content)
+                if success:
+                    return web.json_response({"message": f"Message sent to {recipient_id}."}, status=200)
+                else:
+                    return web.json_response({"error": f"Failed to send message to {recipient_id}."}, status=500)
+            else:
+                # Broadcast the message
+                await self.peer.broadcast_message(content)
+                return web.json_response({"message": "Message broadcasted to all peers."}, status=200)
+        except json.JSONDecodeError:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        except Exception as e:
+            logging.error(f"Error sending message: {e}")
+            return web.json_response({"error": "Internal server error"}, status=500)
+
+    async def get_messages(self, request):
+        try:
+            async with self.peer.message_lock:
+                messages = list(self.peer.received_messages)  # Return a copy
+
+            # Optionally, clear messages after fetching
+            # async with self.peer.message_lock:
+            #     self.peer.received_messages.clear()
+
+            return web.json_response({"messages": messages}, status=200)
+        except Exception as e:
+            logging.error(f"Error fetching messages: {e}")
+            return web.json_response({"error": "Internal server error"}, status=500)
+
+    async def handle_transaction(self, request):
+        try:
+            data = await request.json()
+            sender = data.get('sender')
+            receiver = data.get('receiver')
+            amount = data.get('amount')
+
+            # Basic validation
+            if not all([sender, receiver, amount]):
+                return web.json_response({"error": "Missing required transaction fields."}, status=400)
+
+            try:
+                amount = float(amount)
+                if amount <= 0:
+                    raise ValueError("Amount must be positive.")
+            except ValueError as e:
+                return web.json_response({"error": str(e)}, status=400)
+
+            # Implement your transaction logic here
+            # For example, validate sender's balance, create a transaction record, etc.
+            # Here, we'll simulate successful transaction handling
+            logging.info(f"Transaction received: {sender} -> {receiver} : {amount}")
+
+            # Acknowledge the transaction
+            return web.json_response({"message": "Transaction submitted successfully."}, status=200)
+        except json.JSONDecodeError:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        except Exception as e:
+            logging.error(f"Error handling transaction: {e}")
+            return web.json_response({"error": "Internal server error"}, status=500)
+
+    async def health_check(self, request):
+        return web.json_response({"status": "OK"}, status=200)
