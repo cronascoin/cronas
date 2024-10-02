@@ -130,6 +130,7 @@ def load_config(config_path='cronas.conf'):
         'p2p_port': '4333',
         'maxpeers': '10',
         'addnode': ['137.184.80.215:4333'],
+        'rpc_username': 'admin',  # Added RPC username
         'rpc_password': generate_password(),
         'debug': 'false',
         'log_level': 'INFO'
@@ -169,6 +170,7 @@ async def shutdown(peer, rpc_server):
 async def main(config_path):
     config = load_config(config_path)
     server_id = config.get('server_id')
+    rpc_username = config.get('rpc_username', 'admin')  # Default to 'admin' if not set
     rpc_password = config.get('rpc_password')
     rpc_port = int(config.get('rpc_port', '4334'))
     p2p_port = int(config.get('p2p_port', '4333'))
@@ -176,7 +178,7 @@ async def main(config_path):
 
     peer = Peer('0.0.0.0', p2p_port, server_id, version, max_peers, config=config)
 
-    rpc_server = RPCServer(peer, '127.0.0.1', rpc_port, rpc_password)
+    rpc_server = RPCServer(peer, '127.0.0.1', rpc_port, rpc_password, rpc_username=rpc_username)
 
     # Create tasks for peer and RPC server
     peer_task = asyncio.create_task(peer.start())

@@ -8,3 +8,4 @@ my_certificate.json
 private_key.pem
 trust_store.json
 settings.json
+blacklist.txt
