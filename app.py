@@ -1,4 +1,3 @@
-# Copyright 2023 Cronas.org
 # app.py
 
 import asyncio
@@ -14,12 +13,23 @@ import argparse
 from peer import Peer
 from rpc import RPCServer
 
+# Centralized Logging Configuration
+def setup_logging(log_level='INFO'):
+    numeric_level = getattr(logging, log_level.upper(), None)
+    if not isinstance(numeric_level, int):
+        numeric_level = logging.INFO
+    logging.basicConfig(level=numeric_level,
+                        format='%(asctime)s - %(levelname)s - %(message)s')
+
 def generate_password(length=12):
     characters = string.ascii_letters + string.digits + string.punctuation
     return ''.join(random.choice(characters) for _ in range(length))
 
 def get_short_commit_hash():
-    result = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    result = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True)
     return result.stdout.strip() if result.returncode == 0 else 'unknown'
 
 version = f'0.0.1-{get_short_commit_hash()}'
@@ -138,7 +148,7 @@ def load_config(config_path='cronas.conf'):
 
     # Set the logging level dynamically
     log_level = config.get('log_level', 'INFO').upper()
-    logging.getLogger().setLevel(log_level)
+    setup_logging(log_level)
 
     return config
 
@@ -195,3 +205,5 @@ if __name__ == '__main__':
         asyncio.run(main(config_path=args.config))
     except KeyboardInterrupt:
         logging.info("Shutdown initiated by user.")
+    except Exception as e:
+        logging.error(f"Unhandled exception: {e}", exc_info=True)

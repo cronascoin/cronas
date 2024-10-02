@@ -1,3 +1,5 @@
+# rpc.py
+
 import asyncio
 import ipaddress
 import time
@@ -6,23 +8,22 @@ import json
 import logging
 import base64
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 class RPCServer:
-    def __init__(self, peer, host, rpc_port, rpc_password):
+    def __init__(self, peer, host, rpc_port, rpc_password, rpc_username='admin'):
         self.peer = peer
         self.host = host
         self.rpc_port = rpc_port
         self.rpc_password = rpc_password
+        self.rpc_username = rpc_username
         self.app = web.Application(middlewares=[self.auth_middleware])
         self.runner = None
 
     async def auth_middleware(self, app, handler):
         async def middleware_handler(request):
-            if request.method == 'POST' and not self.check_auth(request):
+            if request.method in ['POST', 'GET'] and not self.check_auth(request):
                 return web.Response(status=401, text='Unauthorized')
             return await handler(request)
+
         return middleware_handler
 
     def check_auth(self, request):
@@ -36,7 +37,7 @@ class RPCServer:
                 return False
             decoded_credentials = base64.b64decode(credentials).decode('utf-8')
             username, password = decoded_credentials.split(':', 1)
-            return password == self.rpc_password
+            return username == self.rpc_username and password == self.rpc_password
         except (ValueError, base64.binascii.Error):
             return False
 
@@ -158,10 +159,8 @@ class RPCServer:
         try:
             async with self.peer.message_lock:
                 messages = list(self.peer.received_messages)  # Return a copy
-
-            # Optionally, clear messages after fetching
-            # async with self.peer.message_lock:
-            #     self.peer.received_messages.clear()
+                # Optionally, clear messages after fetching
+                self.peer.received_messages.clear()
 
             return web.json_response({"messages": messages}, status=200)
         except Exception as e:
