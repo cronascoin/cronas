@@ -852,7 +852,7 @@ class Peer:
         logger.debug(f"Available peers to connect: {available_peers}")
 
         if not available_peers:
-            logger.info("No available peers to connect.")
+            logger.debug("No available peers to connect.")
             return
 
         peers_to_connect = random.sample(available_peers, min(self.max_peers, len(available_peers)))
@@ -1329,7 +1329,7 @@ class Peer:
     async def handle_heartbeat_ack(self, message):
         peer_server_id = message.get('server_id', 'unknown')
         timestamp = message.get('timestamp', time.time())
-        logger.info(f"Received heartbeat acknowledgment from {peer_server_id} at {timestamp}")
+        logger.debug(f"Received heartbeat acknowledgment from {peer_server_id} at {timestamp}")
 
         # Update the lastseen time for the peer
         if peer_server_id in self.active_peers:
