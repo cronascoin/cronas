@@ -18,6 +18,8 @@ from Crypto.PublicKey import RSA
 from Crypto.Signature import pkcs1_15
 from Crypto.Hash import SHA256
 import base64
+import uuid
+
 
 # Initialize logging (Removed basicConfig to centralize in app.py)
 logger = logging.getLogger(__name__)
@@ -87,6 +89,8 @@ class Peer:
         self.load_trust_store()  # Load the trust store
         self.received_messages = []
         self.message_lock = asyncio.Lock()
+        self.seen_message_ids = set()  # Set to track seen message IDs
+        self.seen_message_lock = asyncio.Lock()  # Async lock for thread-safe access
 
         # Set the logging level based on the configuration
         log_level = self.config.get('log_level', 'INFO').upper()
@@ -1200,6 +1204,21 @@ class Peer:
         sender_id = message.get('sender_id', 'unknown')
         content = message.get('content', '')
         timestamp = message.get('timestamp', time.time())
+        message_id = message.get('message_id')  # Retrieve the message ID
+
+        if not message_id:
+            logger.warning("Received a broadcast message without a message_id. Ignoring.")
+            return
+
+        async with self.seen_message_lock:
+            if message_id in self.seen_message_ids:
+                logger.debug(f"Already processed message_id {message_id}. Ignoring to prevent rebroadcast.")
+                return  # Skip processing to prevent infinite rebroadcasting
+            self.seen_message_ids.add(message_id)  # Mark the message as seen
+
+        # Optional: Implement a mechanism to purge old message IDs to prevent memory bloat
+        # For example, using a timestamped approach or limiting the size of the set
+
         msg = {
             'sender_id': sender_id,
             'content': content,
@@ -1216,9 +1235,8 @@ class Peer:
         print(f"\nNew message from {sender_id}: {content}\n")
 
         if message.get("type") == "broadcast_message":
-            # Forward the broadcast message to other peers
+            # Forward the broadcast message to other peers, excluding the original sender
             await self.forward_broadcast_message(message, exclude_sender=sender_id)
-
 
 
     async def forward_broadcast_message(self, message, exclude_sender=None):
@@ -1256,10 +1274,12 @@ class Peer:
 
     async def broadcast_message(self, content):
         """Broadcast a message to all connected peers."""
+        message_id = str(uuid.uuid4())  # Generate a unique message ID
         message = {
             "type": "broadcast_message",
             "sender_id": self.server_id,
             "content": content,
+            "message_id": message_id,  # Include the message ID
             "timestamp": time.time() + self.ntp_offset
         }
         logger.debug(f"Preparing to broadcast message: {message}")
