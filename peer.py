@@ -627,6 +627,8 @@ class Peer:
             await self.send_peer_list(writer)
         elif message_type == "heartbeat":
             await self.respond_to_heartbeat(writer, message)
+        elif message_type == "heartbeat_ack":  # Added handler for heartbeat_ack
+            await self.handle_heartbeat_ack(message)
         elif message_type == "peer_list":
             await self.handle_peer_list_message(message)
         elif message_type == "certificate_signature":
@@ -1324,3 +1326,14 @@ class Peer:
             except Exception as e:
                 logger.error(f"Failed to load blacklist: {e}")
 
+    async def handle_heartbeat_ack(self, message):
+        peer_server_id = message.get('server_id', 'unknown')
+        timestamp = message.get('timestamp', time.time())
+        logger.info(f"Received heartbeat acknowledgment from {peer_server_id} at {timestamp}")
+
+        # Update the lastseen time for the peer
+        if peer_server_id in self.active_peers:
+            self.active_peers[peer_server_id]['lastseen'] = int(timestamp)
+            logger.debug(f"Updated last seen for {peer_server_id} to {timestamp}")
+        else:
+            logger.warning(f"Received heartbeat_ack from unknown peer {peer_server_id}")
