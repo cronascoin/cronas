@@ -23,7 +23,7 @@ sudo apt install python3-pip
 apt update && apt upgrade -y
 ```
 ```
-pip install aiohttp aiofiles pystun3 ntplib pycryptodome
+pip install requirements.txt
 ```
 ```
 git clone https://github.com/cronascoin/cronas.git
