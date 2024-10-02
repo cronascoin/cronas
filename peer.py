@@ -1194,6 +1194,77 @@ class Peer:
         else:
             logger.info(f"Already have signature from peer {peer_server_id}.")
 
+    async def handle_incoming_chat_message(self, message):
+        sender_id = message.get('sender_id', 'unknown')
+        content = message.get('content', '')
+        timestamp = message.get('timestamp', time.time())
+        msg = {
+            'sender_id': sender_id,
+            'content': content,
+            'timestamp': timestamp
+        }
+        async with self.message_lock:
+            self.received_messages.append(msg)
+            logger.info(f"Stored message from {sender_id}: {content}")
+
+        if message.get("type") == "broadcast_message":
+            # Forward the broadcast message to other peers
+            await self.forward_broadcast_message(message, exclude_sender=sender_id)
+
+    async def forward_broadcast_message(self, message, exclude_sender=None):
+        """Forward a broadcast message to all connected peers except the sender."""
+        for server_id, (reader, writer) in self.connections.items():
+            if server_id == exclude_sender:
+                continue
+            try:
+                await self.send_message(writer, message)
+                logger.debug(f"Forwarded broadcast message to {server_id}")
+            except Exception as e:
+                logger.error(f"Failed to forward broadcast message to {server_id}: {e}")
+
+    async def send_message_to_peer(self, recipient_id, content):
+        """Send a direct message to a specific peer."""
+        logger.debug(f"Attempting to send message to {recipient_id}: {content}")
+        if recipient_id not in self.connections:
+            logger.warning(f"Cannot send message. Peer {recipient_id} is not connected.")
+            return False
+        try:
+            writer = self.connections[recipient_id][1]
+            message = {
+                "type": "direct_message",
+                "sender_id": self.server_id,
+                "recipient_id": recipient_id,
+                "content": content,
+                "timestamp": time.time() + self.ntp_offset
+            }
+            await self.send_message(writer, message)
+            logger.info(f"Sent message to {recipient_id}: {content}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send message to {recipient_id}: {e}", exc_info=True)
+            return False
+
+    async def broadcast_message(self, content):
+        """Broadcast a message to all connected peers."""
+        message = {
+            "type": "broadcast_message",
+            "sender_id": self.server_id,
+            "content": content,
+            "timestamp": time.time() + self.ntp_offset
+        }
+        logger.debug(f"Preparing to broadcast message: {message}")
+
+        if not self.connections:
+            logger.warning("No active connections to broadcast the message.")
+            return
+
+        for server_id, (reader, writer) in self.connections.items():
+            try:
+                await self.send_message(writer, message)
+                logger.info(f"Broadcasted message to {server_id}: {content}")
+            except Exception as e:
+                logger.error(f"Failed to broadcast message to {server_id}: {e}", exc_info=True)
+
     async def shutdown(self):
         logger.info("Shutting down Peer...")
         self.shutdown_flag = True
@@ -1223,7 +1294,6 @@ class Peer:
         await self.close_p2p_server()
         logger.info("Peer shutdown complete.")
 
-    # Note: The method save_blacklist() needs to be implemented if blacklisting peers. Here's a simple implementation:
     def save_blacklist(self):
         """Save the blacklist to disk."""
         try:
@@ -1234,7 +1304,6 @@ class Peer:
         except Exception as e:
             logger.error(f"Failed to save blacklist: {e}")
 
-    # Also, you might want to load the blacklist when initializing the Peer:
     def load_blacklist(self):
         """Load the blacklist from disk."""
         if os.path.exists("blacklist.txt"):
