@@ -1203,13 +1203,19 @@ class Peer:
             'content': content,
             'timestamp': timestamp
         }
+        
+        # Store the message
         async with self.message_lock:
             self.received_messages.append(msg)
             logger.info(f"Stored message from {sender_id}: {content}")
-
+        
+        # Print the received message to the terminal
+        print(f"\nNew message from {sender_id}: {content}\n")
+        
+        # If it's a broadcast message, forward it to other peers
         if message.get("type") == "broadcast_message":
-            # Forward the broadcast message to other peers
             await self.forward_broadcast_message(message, exclude_sender=sender_id)
+
 
     async def forward_broadcast_message(self, message, exclude_sender=None):
         """Forward a broadcast message to all connected peers except the sender."""
