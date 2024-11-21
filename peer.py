@@ -61,6 +61,7 @@ class Peer:
         self.trust_store = {}
         self.certificates = {}
         self.blacklist = set()
+        self.load_blacklist()  # Load blacklist at startup
         self.key_pair = self.generate_key_pair()
         self.certificate = self.generate_self_signed_certificate()
         self.external_ip, self.external_p2p_port = get_external_ip()
@@ -843,7 +844,7 @@ class Peer:
         """Attempt to connect to known peers, skipping blacklisted or already connected peers."""
         async with self.peers_connecting_lock:
             # Extract all connected peer_info strings from active_peers
-            connected_peer_infos = {peer_info for peer in self.active_peers.values() for peer_info in [peer['addr']]}
+            connected_peer_infos = {peer['addr'] for peer in self.active_peers.values()}
 
             # Now, filter out peers that are already connected, blacklisted, or currently connecting
             available_peers = [
@@ -869,6 +870,7 @@ class Peer:
         # Update active peers after connection attempts
         self.update_active_peers()
 
+
     async def handle_disconnection(self, server_id):
         if self.shutdown_flag:
             return
@@ -891,6 +893,21 @@ class Peer:
         await self.schedule_rewrite()
 
     async def handle_peer_connection(self, reader, writer):
+        addr = writer.get_extra_info('peername')
+        peer_info = f"{addr[0]}:{addr[1]}"
+
+        if self.debug:
+            logger.info(f"Incoming connection from {peer_info}")
+
+        # Check if the incoming peer is blacklisted
+        if peer_info in self.blacklist:
+            logger.info(f"Blacklisted peer {peer_info} attempted to connect. Removing from blacklist.")
+            self.blacklist.remove(peer_info)
+            self.save_blacklist()  # Persist the updated blacklist
+            writer.close()
+            await writer.wait_closed()
+            return
+
         try:
             # Receive the first message
             message = await self.receive_message(reader)
@@ -1340,11 +1357,13 @@ class Peer:
             try:
                 with open("blacklist.txt", "r") as f:
                     for line in f:
-                        peer_info = line.strip()
-                        self.blacklist.add(peer_info)
+                        if peer_info := line.strip():
+                            self.blacklist.add(peer_info)
                 logger.info("Blacklist loaded from disk.")
             except Exception as e:
                 logger.error(f"Failed to load blacklist: {e}")
+        else:
+            logger.info("No existing blacklist found. Starting with an empty blacklist.")
 
     async def handle_heartbeat_ack(self, message):
         peer_server_id = message.get('server_id', 'unknown')
