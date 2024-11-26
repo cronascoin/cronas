@@ -1,11 +1,13 @@
 peers.dat
 __pycache__
-irc_bot.log
-irclient.py
-settings.json
+.vscode
 cronas.conf
 my_certificate.json
 private_key.pem
 trust_store.json
 settings.json
 blacklist.txt
+blockchain.db
+private_key.pem
+wallet_private_key.pem
+wallet.dat

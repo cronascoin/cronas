@@ -37,6 +37,10 @@ Currently the project is in development.
 
 ## Usage
 
+To run the program from the cronas directory:
+```
+python3 app.py
+```
 For a list of peers
 ```
 python3 cli.py getpeerinfo

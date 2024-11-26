@@ -6,8 +6,12 @@ import json
 import datetime
 import base64
 import os
+import logging
 
 RPC_SERVER = "http://localhost:4334"
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def read_config(config_path='cronas.conf'):
     config = {}
@@ -53,10 +57,9 @@ def get_peer_info(config):
     except requests.RequestException as e:
         print(f"Error connecting to RPC server: {e}")
 
-def send_transaction(config, sender, receiver, amount):
+def send_transaction(config, receiver_address, amount):
     transaction = {
-        "sender": sender,
-        "receiver": receiver,
+        "receiver_address": receiver_address,
         "amount": amount
     }
     try:
@@ -64,6 +67,8 @@ def send_transaction(config, sender, receiver, amount):
         response = requests.post(f"{RPC_SERVER}/transaction", json=transaction, headers=headers)
         if response.status_code == 200:
             print("Transaction submitted successfully.")
+            if transaction_hash := response.json().get("transaction_hash"):
+                print(f"Transaction Hash: {transaction_hash}")
         elif response.status_code == 400:
             error = response.json().get('error', 'Unknown error')
             print(f"Bad Request: {error}")
@@ -152,8 +157,15 @@ def get_messages(config):
             if messages := response.json().get("messages", []):
                 print("Received Messages:")
                 for msg in messages:
-                    timestamp = datetime.datetime.fromtimestamp(msg['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
-                    print(f"[{timestamp}] From {msg['sender_id']}: {msg['content']}")
+                    timestamp_str = msg['timestamp']
+                    try:
+                        # Attempt to parse ISO format
+                        timestamp = datetime.datetime.fromisoformat(timestamp_str)
+                    except ValueError:
+                        # Fallback to UNIX timestamp
+                        timestamp = datetime.datetime.utcfromtimestamp(float(timestamp_str))
+                    timestamp_formatted = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                    print(f"[{timestamp_formatted}] From {msg.get('sender_id', 'unknown')}: {msg.get('content', '')}")
             else:
                 print("No messages received.")
         elif response.status_code == 401:
@@ -165,16 +177,34 @@ def get_messages(config):
     except requests.RequestException as e:
         print(f"Error connecting to RPC server: {e}")
 
+def get_wallet_info(config):
+    try:
+        headers = get_auth_header(config)
+        response = requests.get(f"{RPC_SERVER}/getwalletinfo", headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            print("Wallet Address:", data.get('address'))
+            print("Balance:", data.get('balance'))
+        elif response.status_code == 401:
+            print("Unauthorized access. Check your RPC username and password in cronas.conf.")
+        else:
+            print(f"Failed to get wallet info. Status Code: {response.status_code}")
+            error = response.json().get('error', 'Unknown error')
+            print(f"Error: {error}")
+    except requests.RequestException as e:
+        print(f"Error connecting to RPC server: {e}")
+
 def display_help():
     print("Cronas P2P Network CLI")
     print("Usage:")
     print("  cli.py getpeerinfo                                         - Get information about connected peers")
-    print("  cli.py transaction <sender> <receiver> <amount>           - Send a transaction")
-    print("  cli.py addnode <addr> <port>                              - Add a new node by IP address and port")
-    print("  cli.py sendmessage <recipient_id> <message>               - Send a message to a specific peer")
-    print("  cli.py broadcast <message>                                - Broadcast a message to all peers")
-    print("  cli.py getmessages                                        - Retrieve received messages")
-    print("  cli.py help                                               - Display this help message")
+    print("  cli.py transaction <receiver_address> <amount>             - Send a transaction")
+    print("  cli.py addnode <addr> <port>                               - Add a new node by IP address and port")
+    print("  cli.py sendmessage <recipient_id> <message>                - Send a message to a specific peer")
+    print("  cli.py broadcast <message>                                 - Broadcast a message to all peers")
+    print("  cli.py getmessages                                         - Retrieve received messages")
+    print("  cli.py getwalletinfo                                       - Get wallet address and balance")
+    print("  cli.py help                                                - Display this help message")
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ["help", "--help"]:
@@ -188,11 +218,11 @@ def main():
 
     if command == "getpeerinfo":
         get_peer_info(config)
-    elif command == "transaction" and len(sys.argv) == 5:
-        _, _, sender, receiver, amount = sys.argv
+    elif command == "transaction" and len(sys.argv) == 4:
+        _, _, receiver_address, amount = sys.argv
         try:
             amount = float(amount)
-            send_transaction(config, sender, receiver, amount)
+            send_transaction(config, receiver_address, amount)
         except ValueError:
             print("Invalid amount. Amount should be a number.")
     elif command == "addnode" and len(sys.argv) == 4:
@@ -212,6 +242,8 @@ def main():
         broadcast_message(config, content)
     elif command == "getmessages":
         get_messages(config)
+    elif command == "getwalletinfo":
+        get_wallet_info(config)
     else:
         print("Invalid command or arguments. Use 'cli.py help' for usage.")
 

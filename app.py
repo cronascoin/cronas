@@ -12,6 +12,7 @@ import requests
 import argparse
 from peer import Peer
 from rpc import RPCServer
+from crypto import Crypto
 
 # Centralized Logging Configuration
 def setup_logging(log_level='INFO'):
@@ -129,8 +130,8 @@ def load_config(config_path='cronas.conf'):
         'rpc_port': '4334',
         'p2p_port': '4333',
         'maxpeers': '10',
-        'addnode': ['137.184.80.215:4333'],
-        'rpc_username': 'admin',  # Added RPC username
+        'addnode': ['137.184.80.215:4333'],  # Replace with your seed nodes
+        'rpc_username': 'admin',
         'rpc_password': generate_password(),
         'debug': 'false',
         'log_level': 'INFO'
@@ -153,32 +154,66 @@ def load_config(config_path='cronas.conf'):
 
     return config
 
-async def shutdown(peer, rpc_server):
+async def shutdown(peer, rpc_server, crypto):
     logging.info("Shutting down...")
     try:
-        await peer.shutdown()
+        await asyncio.wait_for(peer.shutdown(), timeout=10)
+    except asyncio.TimeoutError:
+        logging.warning("Timeout while shutting down Peer.")
     except Exception as e:
         logging.error(f"Error shutting down Peer: {e}", exc_info=True)
-    
+
     try:
-        await rpc_server.close_rpc_server()
+        await asyncio.wait_for(rpc_server.close_rpc_server(), timeout=5)
+    except asyncio.TimeoutError:
+        logging.warning("Timeout while closing RPC server.")
     except Exception as e:
         logging.error(f"Error closing RPC server: {e}", exc_info=True)
-    
+
+    try:
+        await asyncio.wait_for(crypto.shutdown(), timeout=10)
+    except asyncio.TimeoutError:
+        logging.warning("Timeout while shutting down Crypto module.")
+    except Exception as e:
+        logging.error(f"Error shutting down Crypto module: {e}", exc_info=True)
+
+    if pending_tasks := [
+        task
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+    ]:
+        logging.info(f"Cancelling {len(pending_tasks)} pending tasks...")
+        for task in pending_tasks:
+            task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.gather(*pending_tasks, return_exceptions=True), timeout=15)
+        except asyncio.TimeoutError:
+            logging.warning("Timeout while cancelling pending tasks.")
+        except Exception as e:
+            logging.error(f"Error cancelling tasks: {e}", exc_info=True)
     logging.info("Shutdown complete.")
 
 async def main(config_path):
     config = load_config(config_path)
     server_id = config.get('server_id')
-    rpc_username = config.get('rpc_username', 'admin')  # Default to 'admin' if not set
+    rpc_username = config.get('rpc_username', 'admin')
     rpc_password = config.get('rpc_password')
     rpc_port = int(config.get('rpc_port', '4334'))
     p2p_port = int(config.get('p2p_port', '4333'))
     max_peers = int(config.get('maxpeers', '10'))
 
+    # Create Peer instance
     peer = Peer('0.0.0.0', p2p_port, server_id, version, max_peers, config=config)
 
+    # Create Crypto instance and set it in Peer
+    crypto = Crypto(peer)
+    peer.set_crypto(crypto)
+
+    # Create RPCServer instance
     rpc_server = RPCServer(peer, '127.0.0.1', rpc_port, rpc_password, rpc_username=rpc_username)
+
+    # Start the Crypto module before starting the Peer
+    await crypto.start()
 
     # Create tasks for peer and RPC server
     peer_task = asyncio.create_task(peer.start())
@@ -188,13 +223,13 @@ async def main(config_path):
         await asyncio.gather(peer_task, rpc_task)
     except KeyboardInterrupt:
         logging.info("Shutdown initiated by user.")
-        await shutdown(peer, rpc_server)
+        await shutdown(peer, rpc_server, crypto)
     except Exception as e:
         logging.error(f"Error during execution: {e}", exc_info=True)
-        await shutdown(peer, rpc_server)
+        await shutdown(peer, rpc_server, crypto)
     finally:
         if not peer.shutdown_flag:
-            await shutdown(peer, rpc_server)
+            await shutdown(peer, rpc_server, crypto)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Cronas P2P App")
