@@ -4,4 +4,4 @@ cryptography
 pycryptodome
 stun
 ntplib
-cryptography
+aiosqlite
