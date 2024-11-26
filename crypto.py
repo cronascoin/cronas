@@ -6,17 +6,10 @@ import logging
 from datetime import datetime, timezone
 import aiosqlite
 import os
-import getpass  # For secure passphrase input
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import (
-    serialization,
-    hashes,
-    padding  # Import padding for PKCS7
-)
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.backends import default_backend
-from cryptography.exceptions import InvalidSignature, InvalidKey
+from cryptography.exceptions import InvalidSignature
 
 logger = logging.getLogger(__name__)
 
@@ -96,115 +89,87 @@ class Crypto:
             }
         logger.info(f"Loaded {len(self.utxo_pool)} UTXOs from the database.")
 
-    async def load_or_create_wallet(self):
-        """Load existing wallet or create a new one with encryption."""
-        wallet_file = "wallet.dat"
-
-        if os.path.exists(wallet_file):
-            # Load the encrypted private key
-            try:
-                with open(wallet_file, "rb") as f:
-                    encrypted_data = f.read()
-
-                # Extract the salt and the encrypted private key
-                salt = encrypted_data[:16]
-                iv = encrypted_data[16:32]
-                encrypted_private_key = encrypted_data[32:]
-
-                # Prompt the user for the passphrase
-                passphrase = getpass.getpass("Enter your wallet passphrase: ")
-
-                # Derive the key using PBKDF2HMAC
-                kdf_instance = PBKDF2HMAC(
-                    algorithm=hashes.SHA256(),
-                    length=32,
-                    salt=salt,
-                    iterations=100000,
-                    backend=default_backend()
-                )
-                key = kdf_instance.derive(passphrase.encode())
-
-                # Decrypt the private key
-                cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-                decryptor = cipher.decryptor()
-                padded_private_key = decryptor.update(encrypted_private_key) + decryptor.finalize()
-
-                # Remove padding
-                unpadder = padding.PKCS7(128).unpadder()
-                private_key_bytes = unpadder.update(padded_private_key) + unpadder.finalize()
-
-                # Load the private key
-                self.private_key = serialization.load_pem_private_key(
-                    private_key_bytes,
-                    password=None,
-                    backend=default_backend()
-                )
-                logger.info("Wallet private key loaded successfully.")
-            except (InvalidKey, ValueError) as e:
-                if isinstance(e, InvalidKey):
-                    logger.error("Incorrect passphrase or corrupted wallet.dat file.")
-                elif isinstance(e, ValueError):
-                    logger.error("Invalid padding: The provided passphrase may be incorrect or the wallet file is corrupted.")
-                raise e
-            except Exception as e:
-                logger.error(f"Failed to load wallet private key: {e}")
-                raise e
-        else:
-            # Create a new wallet
-            self.private_key = ec.generate_private_key(ec.SECP256K1())
-            passphrase = getpass.getpass("Create a passphrase for your new wallet: ")
-            confirm_passphrase = getpass.getpass("Confirm your passphrase: ")
-
-            if passphrase != confirm_passphrase:
-                logger.error("Passphrases do not match. Wallet creation aborted.")
-                raise ValueError("Passphrases do not match.")
-
-            # Generate a random salt
-            salt = os.urandom(16)
-            # Derive the key using PBKDF2HMAC
-            kdf_instance = PBKDF2HMAC(
-                algorithm=hashes.SHA256(),
-                length=32,
-                salt=salt,
-                iterations=100000,
-                backend=default_backend()
+    def create_new_wallet(self):
+        """Create a new wallet with a fresh private key and save it."""
+        try:
+            # Generate a new private key
+            self.private_key = ec.generate_private_key(ec.SECP256K1(), default_backend())
+            
+            # Generate wallet address from the public key
+            public_key = self.private_key.public_key()
+            wallet_address_bytes = public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
             )
-            key = kdf_instance.derive(passphrase.encode())
+            # Use SHA-256 hash of the public key as the wallet address
+            self.wallet_address = hashlib.sha256(wallet_address_bytes).hexdigest()
+            logger.info(f"New wallet created with address: {self.wallet_address}")
+            
+            # Save the new wallet
+            self.save_wallet()
+        except Exception as e:
+            logger.error(f"Failed to create a new wallet: {e}")
+            raise e
 
-            # Serialize the private key
-            private_key_bytes = self.private_key.private_bytes(
+    def save_wallet(self):
+        """Save wallet data in plaintext."""
+        try:
+            # Serialize the private key to PEM format
+            private_key_pem = self.private_key.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.PKCS8,
                 encryption_algorithm=serialization.NoEncryption()
-            )
+            ).decode('utf-8')
+            
+            wallet_data = {
+                "wallet_address": self.wallet_address,
+                "private_key": private_key_pem
+            }
+            
+            with open("wallet.dat", "w") as f:
+                json.dump(wallet_data, f, indent=4)
+            
+            logger.info("Wallet data saved in plaintext.")
+        except Exception as e:
+            logger.error(f"Failed to save wallet data: {e}")
 
-            # Pad the private key for AES block size
-            padder = padding.PKCS7(128).padder()
-            padded_private_key = padder.update(private_key_bytes) + padder.finalize()
+    def load_wallet(self):
+        """Load wallet data from plaintext."""
+        wallet_file = "wallet.dat"
 
-            # Generate a random IV
-            iv = os.urandom(16)
+        if not os.path.exists(wallet_file):
+            logger.info("wallet.dat does not exist. Starting with a new wallet.")
+            self.create_new_wallet()
+            return
 
-            # Encrypt the private key
-            cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-            encryptor = cipher.encryptor()
-            encrypted_private_key = encryptor.update(padded_private_key) + encryptor.finalize()
+        try:
+            self._extracted_from_load_wallet_11(wallet_file)
+        except Exception as e:
+            logger.error(f"Failed to load wallet data: {e}")
+            self.create_new_wallet()
 
-            # Write the salt, IV, and encrypted private key to wallet.dat
-            with open(wallet_file, "wb") as f:
-                f.write(salt + iv + encrypted_private_key)
+    # TODO Rename this here and in `load_wallet`
+    def _extracted_from_load_wallet_11(self, wallet_file):
+        with open(wallet_file, "r") as f:
+            wallet_data = json.load(f)
 
-            logger.info("New wallet created and private key saved securely.")
+        # Load wallet address
+        self.wallet_address = wallet_data.get("wallet_address")
+        if not self.wallet_address:
+            raise ValueError("Wallet address not found in wallet.dat.")
 
-        # Generate wallet address from the public key
-        public_key = self.private_key.public_key()
-        wallet_address_bytes = public_key.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        # Load private key
+        private_key_pem = wallet_data.get("private_key")
+        if not private_key_pem:
+            raise ValueError("Private key not found in wallet.dat.")
+
+        self.private_key = serialization.load_pem_private_key(
+            private_key_pem.encode('utf-8'),
+            password=None,
+            backend=default_backend()
         )
-        # Use SHA-256 hash of the public key as the wallet address
-        self.wallet_address = hashlib.sha256(wallet_address_bytes).hexdigest()
-        logger.info(f"Wallet address: {self.wallet_address}")
+
+        logger.info("Wallet data loaded from plaintext.")
 
     def get_wallet_info(self):
         """Return the wallet address and balance."""
@@ -559,7 +524,7 @@ class Crypto:
         """Start the Crypto module tasks."""
         await self.init_blockchain_db()
         await self.load_utxos_from_db()
-        await self.load_or_create_wallet()
+        self.load_wallet()
 
     async def shutdown(self):
         """Shut down the Crypto module."""

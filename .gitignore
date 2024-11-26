@@ -8,6 +8,6 @@ trust_store.json
 settings.json
 blacklist.txt
 blockchain.db
-private_key.pem
-wallet_private_key.pem
+peer_private.key
+peer_certificate.crt
 wallet.dat
