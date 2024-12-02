@@ -1,7 +1,7 @@
 # requirements.txt
 aiofiles
 cryptography
-pycryptodome
-stun
 ntplib
-aiosqlite
+netifaces
+requests
+jsonschema

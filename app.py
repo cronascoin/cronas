@@ -1,73 +1,173 @@
 # app.py
 
 import asyncio
+import contextlib
+import logging
+import signal
+import sys
 import os
 import uuid
 import string
 import random
-import logging
 import subprocess
 import netifaces
 import requests
 import argparse
-from peer import Peer
-from rpc import RPCServer
+
 from crypto import Crypto
+from peer import Peer
+from block_reward import BlockReward
+from rpc import RPCServer
+from message import MessageHandler  # Import the MessageHandler class
 
-# Centralized Logging Configuration
-def setup_logging(log_level='INFO'):
-    numeric_level = getattr(logging, log_level.upper(), None)
-    if not isinstance(numeric_level, int):
-        numeric_level = logging.INFO
-    logging.basicConfig(level=numeric_level,
-                        format='%(asctime)s - %(levelname)s - %(message)s')
-
-def generate_password(length=12):
-    characters = string.ascii_letters + string.digits + string.punctuation
-    return ''.join(random.choice(characters) for _ in range(length))
+# ----------------------------
+# Versioning and Metadata
+# ----------------------------
 
 def get_short_commit_hash():
-    result = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True)
-    return result.stdout.strip() if result.returncode == 0 else 'unknown'
+    """
+    Retrieves the short Git commit hash for versioning.
+
+    Returns:
+        str: Short commit hash or 'unknown' if retrieval fails.
+    """
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+        return result.stdout.strip()
+    except subprocess.SubprocessError:
+        return 'unknown'
 
 version = f'0.0.1-{get_short_commit_hash()}'
 
+# ----------------------------
+# Configuration Management
+# ----------------------------
+
+def generate_password(length=12):
+    """
+    Generates a random password containing letters, digits, and punctuation.
+
+    Args:
+        length (int): Length of the password.
+
+    Returns:
+        str: Generated password.
+    """
+    characters = string.ascii_letters + string.digits + string.punctuation
+    return ''.join(random.choice(characters) for _ in range(length))
+
 def get_mac_address():
+    """
+    Retrieves the MAC address of the first non-loopback interface.
+
+    Returns:
+        str or None: MAC address or None if not found.
+    """
     interfaces = netifaces.interfaces()
     for interface in interfaces:
         addresses = netifaces.ifaddresses(interface)
         if netifaces.AF_LINK in addresses:
             if mac_address_info := addresses[netifaces.AF_LINK]:
-                mac_address = mac_address_info[0]['addr']
+                mac_address = mac_address_info[0].get('addr')
                 if mac_address and mac_address != '00:00:00:00:00:00':
                     return mac_address
     return None
 
+def get_out_ip():
+    """
+    Detects the external IP address using external services.
+
+    Returns:
+        str or None: External IP address or None if detection fails.
+    """
+    try:
+        response = requests.get('https://api.ipify.org?format=json', timeout=5)
+        response.raise_for_status()
+        ip = response.json().get('ip')
+        if ip == '127.0.0.1':
+            raise ValueError("Detected external IP is 127.0.0.1, which is invalid.")
+        return ip
+    except (requests.RequestException, ValueError) as e:
+        logging.error(f"Failed to detect external IP address: {e}")
+        return get_fallback_ip()
+
+def get_fallback_ip():
+    """
+    Fallback method to detect external IP using a different service.
+
+    Returns:
+        str or None: External IP address or None if detection fails.
+    """
+    try:
+        response = requests.get('https://ifconfig.me', timeout=5)
+        response.raise_for_status()
+        ip = response.text.strip()
+        if ip == '127.0.0.1':
+            raise ValueError("Fallback detected external IP is 127.0.0.1, which is invalid.")
+        return ip
+    except requests.RequestException as e:
+        logging.error(f"Fallback method failed to detect external IP address: {e}")
+        return None
+
 def generate_uuid_from_mac_and_ip(mac_address, ip_address):
+    """
+    Generates a UUID based on MAC address and IP address.
+
+    Args:
+        mac_address (str): MAC address.
+        ip_address (str): IP address.
+
+    Returns:
+        str: Generated UUID.
+    """
     namespace = uuid.UUID('00000000-0000-0000-0000-000000000000')
     combined = f"{mac_address.lower()}-{ip_address}"
-    return uuid.uuid5(namespace, combined)
+    return str(uuid.uuid5(namespace, combined))
 
 def read_config(config_path='cronas.conf'):
+    """
+    Reads the configuration file and parses key-value pairs.
+
+    Args:
+        config_path (str): Path to the configuration file.
+
+    Returns:
+        dict: Configuration parameters.
+    """
     config = {}
     if os.path.exists(config_path):
         try:
             with open(config_path, 'r') as configfile:
                 for line in configfile:
-                    if '=' in line:
+                    # Ignore comments and empty lines
+                    if '=' in line and not line.strip().startswith('#'):
                         key, value = line.strip().split('=', 1)
                         if key == 'addnode':
+                            # Support multiple addnode entries
                             config.setdefault(key, []).append(value)
                         else:
                             config[key] = value
         except Exception as e:
             logging.error(f"Failed to read the config file: {e}")
+            sys.exit(1)
+    else:
+        logging.warning("Config file not found. Using default settings.")
     return config
 
 def write_config(config, config_path='cronas.conf'):
+    """
+    Writes the configuration dictionary back to the configuration file.
+
+    Args:
+        config (dict): Configuration parameters.
+        config_path (str): Path to the configuration file.
+    """
     try:
         with open(config_path, 'w') as configfile:
             for key, value in config.items():
@@ -81,40 +181,23 @@ def write_config(config, config_path='cronas.conf'):
         logging.error(f"Failed to write to the config file '{config_path}': {e}")
         raise e
 
-def get_out_ip():
-    try:
-        response = requests.get('https://api.ipify.org?format=json', timeout=5)
-        response.raise_for_status()
-        ip = response.json()['ip']
-        if ip == '127.0.0.1':
-            raise ValueError("Detected out_ip is 127.0.0.1, which is invalid.")
-        return ip
-    except (requests.RequestException, ValueError) as e:
-        logging.error(f"Failed to detect external IP address: {e}")
-        return get_fallback_ip()
+def generate_server_id(config, config_path='cronas.conf'):
+    """
+    Generates and ensures the server_id is present and correct in the config.
 
-def get_fallback_ip():
-    """Fallback method to detect external IP using a different service."""
-    try:
-        response = requests.get('https://ifconfig.me', timeout=5)
-        response.raise_for_status()
-        ip = response.text.strip()
-        if ip == '127.0.0.1':
-            raise ValueError("Fallback detected out_ip is 127.0.0.1, which is invalid.")
-        return ip
-    except requests.RequestException as e:
-        logging.error(f"Fallback method failed to detect external IP address: {e}")
-        return None
+    Args:
+        config (dict): Current configuration.
+        config_path (str): Path to the configuration file.
 
-def load_config(config_path='cronas.conf'):
-    config = read_config(config_path)
-
+    Returns:
+        str: The correct server_id.
+    """
     mac_address = get_mac_address()
     out_ip = get_out_ip()
-    
+
     if mac_address and out_ip:
         generated_uuid = generate_uuid_from_mac_and_ip(mac_address, out_ip)
-        correct_server_id = str(generated_uuid)
+        correct_server_id = generated_uuid
         logging.info(f"MAC Address: {mac_address}, Public IP: {out_ip}, Generated UUID: {correct_server_id}")
     else:
         logging.warning("MAC address or public IP address could not be found, generating random UUID for server_id.")
@@ -128,13 +211,13 @@ def load_config(config_path='cronas.conf'):
 
     default_config = {
         'rpc_port': '4334',
-        'p2p_port': '4333',
         'maxpeers': '10',
         'addnode': ['137.184.80.215:4333'],  # Replace with your seed nodes
         'rpc_username': 'admin',
         'rpc_password': generate_password(),
         'debug': 'false',
-        'log_level': 'INFO'
+        'log_level': 'INFO',
+        # Removed hard-coded parameters from default_config
     }
 
     for key, value in default_config.items():
@@ -148,99 +231,185 @@ def load_config(config_path='cronas.conf'):
     else:
         logging.info("Configuration is up to date.")
 
-    # Set the logging level dynamically
-    log_level = config.get('log_level', 'INFO').upper()
-    setup_logging(log_level)
-
     return config
 
-async def shutdown(peer, rpc_server, crypto):
-    logging.info("Shutting down...")
-    try:
-        await asyncio.wait_for(peer.shutdown(), timeout=10)
-    except asyncio.TimeoutError:
-        logging.warning("Timeout while shutting down Peer.")
-    except Exception as e:
-        logging.error(f"Error shutting down Peer: {e}", exc_info=True)
+def setup_logging_config(config):
+    """
+    Configures the logging based on the configuration.
 
-    try:
-        await asyncio.wait_for(rpc_server.close_rpc_server(), timeout=5)
-    except asyncio.TimeoutError:
-        logging.warning("Timeout while closing RPC server.")
-    except Exception as e:
-        logging.error(f"Error closing RPC server: {e}", exc_info=True)
+    Args:
+        config (dict): Configuration parameters.
+    """
+    log_level = config.get('log_level', 'INFO').upper()
+    numeric_level = getattr(logging, log_level, logging.INFO)
+    logging.basicConfig(
+        level=numeric_level,
+        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+    return logging.getLogger(__name__)
 
-    try:
-        await asyncio.wait_for(crypto.shutdown(), timeout=10)
-    except asyncio.TimeoutError:
-        logging.warning("Timeout while shutting down Crypto module.")
-    except Exception as e:
-        logging.error(f"Error shutting down Crypto module: {e}", exc_info=True)
-
-    if pending_tasks := [
-        task
-        for task in asyncio.all_tasks()
-        if task is not asyncio.current_task()
-    ]:
-        logging.info(f"Cancelling {len(pending_tasks)} pending tasks...")
-        for task in pending_tasks:
-            task.cancel()
-        try:
-            await asyncio.wait_for(asyncio.gather(*pending_tasks, return_exceptions=True), timeout=15)
-        except asyncio.TimeoutError:
-            logging.warning("Timeout while cancelling pending tasks.")
-        except Exception as e:
-            logging.error(f"Error cancelling tasks: {e}", exc_info=True)
-    logging.info("Shutdown complete.")
-
-async def main(config_path):
-    config = load_config(config_path)
-    server_id = config.get('server_id')
-    rpc_username = config.get('rpc_username', 'admin')
-    rpc_password = config.get('rpc_password')
-    rpc_port = int(config.get('rpc_port', '4334'))
-    p2p_port = int(config.get('p2p_port', '4333'))
-    max_peers = int(config.get('maxpeers', '10'))
-
-    # Create Peer instance
-    peer = Peer('0.0.0.0', p2p_port, server_id, version, max_peers, config=config)
-
-    # Create Crypto instance and set it in Peer
-    crypto = Crypto(peer)
-    peer.set_crypto(crypto)
-
-    # Create RPCServer instance
-    rpc_server = RPCServer(peer, '127.0.0.1', rpc_port, rpc_password, rpc_username=rpc_username)
-
-    # Start the Crypto module before starting the Peer
-    await crypto.start()
-
-    # Create tasks for peer and RPC server
-    peer_task = asyncio.create_task(peer.start())
-    rpc_task = asyncio.create_task(rpc_server.start_rpc_server())
-
-    try:
-        await asyncio.gather(peer_task, rpc_task)
-    except KeyboardInterrupt:
-        logging.info("Shutdown initiated by user.")
-        await shutdown(peer, rpc_server, crypto)
-    except Exception as e:
-        logging.error(f"Error during execution: {e}", exc_info=True)
-        await shutdown(peer, rpc_server, crypto)
-    finally:
-        if not peer.shutdown_flag:
-            await shutdown(peer, rpc_server, crypto)
+# ----------------------------
+# Argument Parsing
+# ----------------------------
 
 def parse_args():
+    """
+    Parses command-line arguments.
+
+    Returns:
+        argparse.Namespace: Parsed arguments.
+    """
     parser = argparse.ArgumentParser(description="Cronas P2P App")
     parser.add_argument('--config', type=str, default='cronas.conf', help='Path to configuration file')
     return parser.parse_args()
 
+# ----------------------------
+# Main Application
+# ----------------------------
+
+async def main(config_path):
+    """
+    Main entry point for the application. Initializes modules and starts services.
+
+    Args:
+        config_path (str): Path to the configuration file.
+    """
+    try:
+        # Load configuration
+        config = read_config(config_path)
+
+        # Generate or validate server_id
+        config = generate_server_id(config, config_path)
+
+        # Setup logging based on config
+        logger = setup_logging_config(config)
+        logger.info(f"Starting Cronas P2P App version {version}")
+
+        # Hard-Coded Parameters
+        BLOCK_REWARD_AMOUNT = 24.0
+        UPTIME_FILE = 'uptime.json'
+        BLOCKCHAIN_JSON = 'blockchain.json'
+        UTXOS_JSON = 'utxos.json'
+        WALLET_FILE = 'wallet.dat'
+        CERTFILE = 'peer_certificate.crt'
+        KEYFILE = 'peer_private.key'
+        HOST = '0.0.0.0'
+        PORT = 4333
+        RPC_HOST = 'localhost'
+        TRUSTED_CERTS_DIR = 'trusted_certs'
+
+        # Initialize Crypto module with hard-coded parameters
+        crypto = Crypto(
+            blockchain_file=BLOCKCHAIN_JSON,
+            utxo_file=UTXOS_JSON,
+            wallet_file=WALLET_FILE,
+            certfile=CERTFILE,
+            keyfile=KEYFILE,
+            trusted_certs_dir=TRUSTED_CERTS_DIR
+        )
+
+        # Initialize Peer module with hard-coded host, port, and addnode list
+        addnode_list = config.get('addnode', [])  # Still read addnode from config
+
+        peer = Peer(
+            host=HOST,
+            port=PORT,
+            crypto=crypto,
+            version=version,
+            debug=config.get('debug', 'false').lower() == 'true',
+            max_peers=int(config.get('maxpeers', '10')),
+            server_id=config.get('server_id'),
+            addnode=addnode_list  # Pass the addnode list
+        )
+
+        # Initialize MessageHandler with the peer instance
+        message_handler = MessageHandler(peer=peer)
+
+        # Assign the message_handler to the peer
+        peer.message = message_handler
+
+        # Initialize BlockReward module with the peer instance and hard-coded parameters
+        block_reward = BlockReward(
+            crypto=crypto,
+            peer=peer,  # Pass the peer instance
+            uptime_file=UPTIME_FILE,
+            reward_amount=BLOCK_REWARD_AMOUNT,
+        )
+
+        # Retrieve RPC credentials from the configuration
+        rpc_password = config.get('rpc_password', 'securepassword')
+        rpc_username = config.get('rpc_username', 'admin')
+
+        # Initialize RPC Server with hard-coded parameters
+        rpc_server = RPCServer(
+            peer=peer,
+            host=RPC_HOST,
+            rpc_port=int(config.get('rpc_port', '4334')),
+            rpc_password=rpc_password,
+            rpc_username=rpc_username,
+        )
+
+        # Start Crypto module (generates SSL certificates, initializes SSL contexts, loads data)
+        await crypto.start()
+
+        # Start RPC Server
+        await rpc_server.start_rpc_server()
+
+        # Connect to known peers from addnode list
+        for peer_address in addnode_list:
+            # Assuming peer_address is in the format "host:port"
+            try:
+                addr, port = peer_address.split(':')
+                logger.info(f"Attempting to connect to peer at {addr}:{port}")
+                asyncio.create_task(peer.connect_to_peer(addr, int(port)))
+            except ValueError:
+                logger.warning(f"Invalid peer address format: {peer_address}")
+
+        # BlockReward's uptime tracking is already started in its constructor
+
+        # Define shutdown handler
+        async def shutdown_handler(signame):
+            logger.info(f"Received signal {signame}: initiating shutdown...")
+
+            logger.info("Shutting down RPC server...")
+            await rpc_server.stop_rpc_server()
+
+            logger.info("Shutting down Peer connections...")
+            await peer.shutdown()
+
+            logger.info("Shutting down BlockReward...")
+            await block_reward.shutdown()
+
+            logger.info("Shutting down Crypto module...")
+            await crypto.shutdown()
+
+            logger.info("Shutdown complete.")
+            sys.exit(0)
+
+        # Register shutdown signals
+        for signame in ('SIGINT', 'SIGTERM'):
+            try:
+                asyncio.get_event_loop().add_signal_handler(
+                    getattr(signal, signame),
+                    lambda signame=signame: asyncio.create_task(shutdown_handler(signame)),
+                )
+            except NotImplementedError:
+                # Signal handlers are not available on Windows for certain signals
+                logger.warning(f"Signal {signame} not implemented on this platform.")
+
+        # Keep the application running indefinitely
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.Event().wait()
+
+    except Exception:
+        logging.exception("An error occurred in the main function.")
+
+# ----------------------------
+# Entry Point
+# ----------------------------
+
 if __name__ == '__main__':
     args = parse_args()
-    try:
-        asyncio.run(main(config_path=args.config))
-    except KeyboardInterrupt:
-        logging.info("Shutdown initiated by user.")
-    except Exception as e:
-        logging.error(f"Unhandled exception: {e}", exc_info=True)
+    config_path = args.config
+    asyncio.run(main(config_path))

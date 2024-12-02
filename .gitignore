@@ -1,3 +1,4 @@
+.gitignore
 peers.dat
 __pycache__
 .vscode
@@ -11,3 +12,8 @@ blockchain.db
 peer_private.key
 peer_certificate.crt
 wallet.dat
+utxos.json
+blockchain.json
+uptime.json
+peers_file.json
+trusted_certs

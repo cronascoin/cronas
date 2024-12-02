@@ -31,6 +31,11 @@ git clone https://github.com/cronascoin/cronas.git
 ```
 cd cronas
 python3 app.py
+
+or
+
+python3 app.py --config cronas.conf
+python3 app.py --config path/to/custom.conf
 ```
 
 Currently the project is in development.
