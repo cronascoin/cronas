@@ -598,99 +598,99 @@ class Peer:
     # Additional Peer Methods
     # ----------------------------
 
-async def handle_incoming_chat_message(self, message):
-    """
-    Handle incoming chat messages (broadcast or direct).
+    async def handle_incoming_chat_message(self, message):
+        """
+        Handle incoming chat messages (broadcast or direct).
 
-    Args:
-        message (dict): The incoming message containing fields like:
-                        {
-                          "from": <from_server_id>,
-                          "to": <optional to_server_id>,
-                          "message": <text>,
-                          "timestamp": <float timestamp>,
-                          "message_id": <unique_id>
-                        }
-    """
-    from_server_id = message.get("from")
-    to_server_id = message.get("to")  # Optional for directed messages
-    message_text = message.get("message")
-    timestamp = message.get("timestamp")
-    message_id = message.get("message_id")
+        Args:
+            message (dict): The incoming message containing fields like:
+                            {
+                            "from": <from_server_id>,
+                            "to": <optional to_server_id>,
+                            "message": <text>,
+                            "timestamp": <float timestamp>,
+                            "message_id": <unique_id>
+                            }
+        """
+        from_server_id = message.get("from")
+        to_server_id = message.get("to")  # Optional for directed messages
+        message_text = message.get("message")
+        timestamp = message.get("timestamp")
+        message_id = message.get("message_id")
 
-    # Validate essential fields
-    if not all([from_server_id, message_text, timestamp, message_id]):
-        logger.warning("Incomplete chat message received. Missing one of 'from', 'message', 'timestamp', or 'message_id'.")
-        return
-
-    # Check for duplicate messages
-    async with self.seen_message_lock:
-        if message_id in self.seen_message_ids:
-            logger.debug(f"Duplicate chat message {message_id} received. Ignoring.")
+        # Validate essential fields
+        if not all([from_server_id, message_text, timestamp, message_id]):
+            logger.warning("Incomplete chat message received. Missing one of 'from', 'message', 'timestamp', or 'message_id'.")
             return
-        self.seen_message_ids.append(message_id)
 
-    # Determine if the message is directed or broadcast
-    if to_server_id:
-        # Directed message
-        if to_server_id == self.server_id:
-            # This peer is the intended recipient
-            logger.info(f"Direct message from {from_server_id} to {self.server_id}: {message_text}")
-            print(f"[Direct] {from_server_id}: {message_text}")
+        # Check for duplicate messages
+        async with self.seen_message_lock:
+            if message_id in self.seen_message_ids:
+                logger.debug(f"Duplicate chat message {message_id} received. Ignoring.")
+                return
+            self.seen_message_ids.append(message_id)
+
+        # Determine if the message is directed or broadcast
+        if to_server_id:
+            # Directed message
+            if to_server_id == self.server_id:
+                # This peer is the intended recipient
+                logger.info(f"Direct message from {from_server_id} to {self.server_id}: {message_text}")
+                print(f"[Direct] {from_server_id}: {message_text}")
+            else:
+                # Not the intended recipient; optionally forward to the intended recipient
+                logger.debug(f"Chat message directed to {to_server_id}, not this peer.")
+                await self.forward_directed_message(to_server_id, message)
         else:
-            # Not the intended recipient; optionally forward to the intended recipient
-            logger.debug(f"Chat message directed to {to_server_id}, not this peer.")
-            await self.forward_directed_message(to_server_id, message)
-    else:
-        # Broadcast message
-        logger.info(f"Broadcast message from {from_server_id}: {message_text}")
-        print(f"[Broadcast] {from_server_id}: {message_text}")
+            # Broadcast message
+            logger.info(f"Broadcast message from {from_server_id}: {message_text}")
+            print(f"[Broadcast] {from_server_id}: {message_text}")
 
-        # Optionally rebroadcast the message to other peers
-        # This helps propagate the message across the network.
-        await self.rebroadcast_message(message, exclude_peer=from_server_id)
+            # Optionally rebroadcast the message to other peers
+            # This helps propagate the message across the network.
+            await self.rebroadcast_message(message, exclude_peer=from_server_id)
 
-async def forward_directed_message(self, to_server_id, message):
-    """
-    Forward a directed chat message to the intended peer.
+    async def forward_directed_message(self, to_server_id, message):
+        """
+        Forward a directed chat message to the intended peer.
 
-    Args:
-        to_server_id (str): The server_id of the intended recipient.
-        message (dict): The original chat message.
-    """
-    if peer_info := self.active_peers.get(to_server_id):
-        writer = peer_info['writer']
-        try:
-            await self.message.send_message(writer, {
-                "type": "chat",
-                "data": message
-            })
-            logger.debug(f"Forwarded directed chat message to {to_server_id}.")
-        except Exception as e:
-            logger.error(f"Failed to forward message to {to_server_id}: {e}")
-    else:
-        logger.warning(f"Cannot forward message. Peer {to_server_id} is not connected.")
-
-async def rebroadcast_message(self, message, exclude_peer=None):
-    """
-    Rebroadcast a chat message to all connected peers except the excluded one.
-
-    Args:
-        message (dict): The chat message to rebroadcast.
-        exclude_peer (str, optional): The server_id to exclude from rebroadcasting.
-    """
-    for peer_id, peer_info in self.active_peers.items():
-        if peer_id == exclude_peer:
-            continue
-        writer = peer_info['writer']
-        if not writer.is_closing():
+        Args:
+            to_server_id (str): The server_id of the intended recipient.
+            message (dict): The original chat message.
+        """
+        if peer_info := self.active_peers.get(to_server_id):
+            writer = peer_info['writer']
             try:
                 await self.message.send_message(writer, {
                     "type": "chat",
                     "data": message
                 })
-                logger.debug(f"Rebroadcasted chat message to peer {peer_id}.")
+                logger.debug(f"Forwarded directed chat message to {to_server_id}.")
             except Exception as e:
-                logger.error(f"Failed to rebroadcast chat message to peer {peer_id}: {e}")
+                logger.error(f"Failed to forward message to {to_server_id}: {e}")
         else:
-            logger.warning(f"Cannot rebroadcast to peer {peer_id} as the connection is closing.")
+            logger.warning(f"Cannot forward message. Peer {to_server_id} is not connected.")
+
+    async def rebroadcast_message(self, message, exclude_peer=None):
+        """
+        Rebroadcast a chat message to all connected peers except the excluded one.
+
+        Args:
+            message (dict): The chat message to rebroadcast.
+            exclude_peer (str, optional): The server_id to exclude from rebroadcasting.
+        """
+        for peer_id, peer_info in self.active_peers.items():
+            if peer_id == exclude_peer:
+                continue
+            writer = peer_info['writer']
+            if not writer.is_closing():
+                try:
+                    await self.message.send_message(writer, {
+                        "type": "chat",
+                        "data": message
+                    })
+                    logger.debug(f"Rebroadcasted chat message to peer {peer_id}.")
+                except Exception as e:
+                    logger.error(f"Failed to rebroadcast chat message to peer {peer_id}: {e}")
+            else:
+                logger.warning(f"Cannot rebroadcast to peer {peer_id} as the connection is closing.")

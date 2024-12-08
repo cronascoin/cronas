@@ -294,7 +294,8 @@ async def main(config_path):
         WALLET_FILE = 'wallet.dat'
         HOST = '0.0.0.0'
         PORT = 4333
-        RPC_HOST = 'localhost'
+        RPC_HOST = '0.0.0.0'  # Changed to bind to all interfaces
+        # Adjusted 'localhost' to '0.0.0.0' to allow external access if needed
 
         # Initialize Crypto module with necessary parameters
         crypto = Crypto(
@@ -336,17 +337,18 @@ async def main(config_path):
         # Initialize RPC Server
         rpc_server = RPCServer(
             peer=peer,
+            crypto=crypto,  # Added missing 'crypto' argument
             host=RPC_HOST,
             rpc_port=int(config.get('rpc_port', '4334')),
-            rpc_password=rpc_password,
             rpc_username=rpc_username,
+            rpc_password=rpc_password,
         )
 
         # Start Crypto module (loads data)
         await crypto.initialize()
 
         # Start RPC Server
-        await rpc_server.start_rpc_server()
+        asyncio.create_task(rpc_server.start_rpc_server())
 
         # Connect to known peers
         for peer_address in addnode_list:
@@ -402,4 +404,7 @@ async def main(config_path):
 if __name__ == '__main__':
     args = parse_args()
     config_path = args.config
-    asyncio.run(main(config_path))
+    try:
+        asyncio.run(main(config_path))
+    except KeyboardInterrupt:
+        logging.info("Cronas P2P App shutting down gracefully.")
