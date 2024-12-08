@@ -12,6 +12,7 @@ from cryptography import x509
 from cryptography.x509.oid import NameOID
 import datetime
 import ssl
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +63,7 @@ class Crypto:
         context.load_cert_chain(certfile=certfile, keyfile=keyfile)
 
         if require_client_cert:
-            self._extracted_from_create_client_ssl_context_20(
-                context,
-                "Client certificate verification enabled using trusted_certs directory.",
-            )
+            self._configure_verify_client_certs(context)
         return context
 
     def create_client_ssl_context(self, certfile: str = None, keyfile: str = None) -> ssl.SSLContext:
@@ -81,10 +79,7 @@ class Crypto:
         """
         context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
         context.check_hostname = False
-        self._extracted_from_create_client_ssl_context_20(
-            context,
-            "Server certificate verification enabled using trusted_certs directory.",
-        )
+        self._configure_verify_server_certs(context)
         if certfile and keyfile:
             if os.path.isfile(certfile) and os.path.isfile(keyfile):
                 context.load_cert_chain(certfile=certfile, keyfile=keyfile)
@@ -96,8 +91,32 @@ class Crypto:
 
         return context
 
-    # TODO Rename this here and in `create_server_ssl_context` and `create_client_ssl_context`
-    def _extracted_from_create_client_ssl_context_20(self, context, arg1):
+    def _configure_verify_client_certs(self, context):
+        """
+        Configures the SSL context to verify client certificates using the trusted certificates directory.
+
+        Args:
+            context (ssl.SSLContext): The SSL context to configure.
+        """
+        self._extracted_from__configure_verify_server_certs_8(
+            context,
+            "Client certificate verification enabled using trusted_certs directory.",
+        )
+
+    def _configure_verify_server_certs(self, context):
+        """
+        Configures the SSL context to verify server certificates using the trusted certificates directory.
+
+        Args:
+            context (ssl.SSLContext): The SSL context to configure.
+        """
+        self._extracted_from__configure_verify_server_certs_8(
+            context,
+            "Server certificate verification enabled using trusted_certs directory.",
+        )
+
+    # TODO Rename this here and in `_configure_verify_client_certs` and `_configure_verify_server_certs`
+    def _extracted_from__configure_verify_server_certs_8(self, context, arg1):
         context.verify_mode = ssl.CERT_REQUIRED
         context.load_verify_locations(capath=self.trusted_certs_dir)
         logger.info(arg1)
@@ -166,7 +185,7 @@ class Crypto:
 
     def add_trusted_certificate(self, server_id: str, cert_pem: str):
         """
-        Adds a peer's certificate to the trusted_certs directory.
+        Adds a peer's certificate to the trusted_certs directory and loads its public key.
 
         Args:
             server_id (str): Unique identifier for the server/peer.
@@ -183,21 +202,77 @@ class Crypto:
         else:
             logger.info(f"Trusted certificate for server_id {server_id} already exists at {cert_path}")
 
-    def get_trusted_certificate(self, server_id: str) -> ssl.SSLSocket:
+        if public_key_pem := self.extract_public_key_from_certificate(cert_pem):
+            self.add_peer_public_key(server_id, public_key_pem)
+        else:
+            logger.warning(f"Failed to extract public key from certificate for server_id {server_id}.")
+
+    def get_trusted_certificate_path(self, server_id: str) -> str:
         """
-        Retrieves a trusted certificate for a given server_id.
+        Retrieves the file path of a trusted certificate for a given server_id.
 
         Args:
             server_id (str): Unique identifier for the server/peer.
 
         Returns:
-            ssl.SSLSocket: SSL certificate object.
+            str: Path to the trusted certificate file, or None if not found.
         """
         cert_path = os.path.join(self.trusted_certs_dir, f"{server_id}.pem")
         if os.path.isfile(cert_path):
             return cert_path
         logger.warning(f"Trusted certificate for server_id {server_id} not found.")
         return None
+
+    def extract_public_key_from_certificate(self, cert_pem: str) -> str:
+        """
+        Extracts the public key from a PEM-encoded certificate.
+
+        Args:
+            cert_pem (str): PEM-encoded certificate string.
+
+        Returns:
+            str: PEM-encoded public key string, or None if extraction fails.
+        """
+        try:
+            cert = x509.load_pem_x509_certificate(cert_pem.encode('utf-8'), backend=default_backend())
+            public_key = cert.public_key()
+            return public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            ).decode('utf-8')
+        except Exception as e:
+            logger.error(f"Failed to extract public key from certificate: {e}")
+            return None
+
+    def add_peer_public_key(self, server_id: str, public_key_pem: str):
+        """
+        Adds a peer's public key to the peer_public_keys mapping.
+
+        Args:
+            server_id (str): Unique identifier for the server/peer.
+            public_key_pem (str): PEM-encoded public key string.
+        """
+        try:
+            public_key = serialization.load_pem_public_key(
+                public_key_pem.encode('utf-8'),
+                backend=default_backend()
+            )
+            self.peer_public_keys[server_id] = public_key
+            logger.info(f"Added public key for server_id {server_id}")
+        except Exception as e:
+            logger.error(f"Failed to load public key for server_id {server_id}: {e}")
+
+    def get_public_key(self, server_id: str):
+        """
+        Retrieve the public key of a peer by server_id.
+
+        Args:
+            server_id (str): The server ID of the peer.
+
+        Returns:
+            PublicKey object or None if not found.
+        """
+        return self.peer_public_keys.get(server_id)
 
     # ----------------------------
     # Blockchain, UTXO, and Wallet Management
@@ -292,7 +367,7 @@ class Crypto:
         self.save_wallet(wallet_data)
         logger.info(f"Created new wallet at {self.wallet_file}")
 
-    def generate_public_key(self):
+    def generate_public_key(self) -> str:
         """
         Generates the public key from the private key.
 
@@ -305,7 +380,7 @@ class Crypto:
         ).decode('utf-8')
         return public_key
 
-    def generate_address(self):
+    def generate_address(self) -> str:
         """
         Generates the wallet address using SHA256 of the public key.
 
@@ -320,7 +395,7 @@ class Crypto:
         digest.update(public_key_bytes)
         return digest.finalize().hex()
 
-    def save_wallet(self, wallet_data):
+    def save_wallet(self, wallet_data: dict):
         """
         Save the wallet data to the specified file.
 
@@ -330,7 +405,7 @@ class Crypto:
         self._save_to_file(self.wallet_file, wallet_data)
 
     @staticmethod
-    def _save_to_file(filename, data):
+    def _save_to_file(filename: str, data):
         """
         Save data to a file in JSON format.
 
@@ -350,7 +425,7 @@ class Crypto:
     # Transaction Management
     # ----------------------------
 
-    async def create_transaction(self, receiver_address, amount):
+    async def create_transaction(self, receiver_address: str, amount: float) -> str:
         """
         Create a transaction with the specified receiver address and amount.
 
@@ -399,7 +474,7 @@ class Crypto:
             logger.info(f"Created transaction {txid} sending {amount} to {receiver_address}")
             return txid
 
-    def generate_txid(self):
+    def generate_txid(self) -> str:
         """
         Generate a unique transaction ID.
 
@@ -477,36 +552,6 @@ class Crypto:
             logger.error(f"Signature verification failed for server_id {server_id}: {e}")
             return False
 
-    def get_public_key(self, server_id: str):
-        """
-        Retrieve the public key of a peer by server_id.
-
-        Args:
-            server_id (str): The server ID of the peer.
-
-        Returns:
-            PublicKey object or None if not found.
-        """
-        return self.peer_public_keys.get(server_id)
-
-    def add_peer_public_key(self, server_id: str, public_key_pem: str):
-        """
-        Add a peer's public key to the mapping.
-
-        Args:
-            server_id (str): The server ID of the peer.
-            public_key_pem (str): The PEM-encoded public key.
-        """
-        try:
-            public_key = serialization.load_pem_public_key(
-                public_key_pem.encode('utf-8'),
-                backend=default_backend()
-            )
-            self.peer_public_keys[server_id] = public_key
-            logger.info(f"Added public key for server_id {server_id}")
-        except Exception as e:
-            logger.error(f"Failed to load public key for server_id {server_id}: {e}")
-
     # ----------------------------
     # Start Method
     # ----------------------------
@@ -539,11 +584,134 @@ class Crypto:
 
         logger.info("Crypto module started successfully.")
 
-    def get_self_certificate_pem(self):
-        # Assuming your certfile is a PEM-encoded file generated by generate_self_signed_certificates()
+    def get_self_certificate_pem(self) -> str:
+        """
+        Retrieves the server's own certificate in PEM format.
+
+        Returns:
+            str: PEM-encoded certificate string, or empty string if not found.
+        """
         if os.path.isfile(self.certfile):
-            with open(self.certfile, 'rb') as f:
-                return f.read().decode('utf-8')
+            try:
+                with open(self.certfile, 'rb') as f:
+                    return f.read().decode('utf-8')
+            except Exception as e:
+                logger.error(f"Failed to read certificate file {self.certfile}: {e}")
+                return ""
         else:
             logger.error(f"Certificate file {self.certfile} not found.")
             return ""
+
+    # ----------------------------
+    # Additional Utility Methods
+    # ----------------------------
+
+    async def update_trusted_certificates(self):
+        """
+        Periodically update trusted certificates by scanning the trusted_certs_dir.
+        This can be useful if certificates are added dynamically.
+        """
+        while True:
+            try:
+                for cert_filename in os.listdir(self.trusted_certs_dir):
+                    if cert_filename.endswith('.pem'):
+                        server_id = cert_filename[:-4]  # Remove '.pem' extension
+                        if server_id not in self.peer_public_keys:
+                            cert_path = os.path.join(self.trusted_certs_dir, cert_filename)
+                            with open(cert_path, 'r') as cert_file:
+                                cert_pem = cert_file.read()
+                            if public_key_pem := self.extract_public_key_from_certificate(
+                                cert_pem
+                            ):
+                                self.add_peer_public_key(server_id, public_key_pem)
+                await asyncio.sleep(300)  # Update every 5 minutes
+            except Exception as e:
+                logger.error(f"Error updating trusted certificates: {e}")
+                await asyncio.sleep(300)  # Retry after delay
+
+    # ----------------------------
+    # Example Method Implementations
+    # ----------------------------
+
+    # These methods are referenced in message.py and should be implemented accordingly.
+    # Depending on your application's architecture, these might belong to another class or module.
+
+    def get_authority_ids(self) -> set:
+        """
+        Retrieves a set of authority server IDs that are trusted to send revocation messages.
+
+        Returns:
+            set: A set of trusted authority server IDs.
+        """
+        # Example implementation; replace with actual authority IDs management
+        return {"authority_server_1", "authority_server_2"}
+
+    def verify_block(self, block_data: dict) -> bool:
+        """
+        Verify the integrity and validity of a block.
+
+        Args:
+            block_data (dict): The block data to verify.
+
+        Returns:
+            bool: True if the block is valid, False otherwise.
+        """
+        # Implement block verification logic here
+        # This is a placeholder implementation
+        try:
+            # Example: Check if block_hash matches the hash of block_data
+            expected_hash = hashlib.sha256(json.dumps(block_data, sort_keys=True).encode('utf-8')).hexdigest()
+            return block_data.get("block_hash") == expected_hash
+        except Exception as e:
+            logger.error(f"Block verification failed: {e}")
+            return False
+
+    async def reward_node(self, generator_address: str):
+        """
+        Reward the node that generated a valid block.
+
+        Args:
+            generator_address (str): The address of the node to reward.
+        """
+        # Implement reward logic here
+        # This is a placeholder implementation
+        reward_amount = 50.0  # Example reward
+        await self.create_transaction(generator_address, reward_amount)
+        logger.info(f"Rewarded node {generator_address} with {reward_amount} units.")
+
+    async def broadcast_block(self, block: dict):
+        """
+        Broadcast a newly created block to all connected peers.
+
+        Args:
+            block (dict): The block data to broadcast.
+        """
+        # Implement block broadcasting logic here
+        # This is a placeholder implementation
+        for peer_id, peer_info in self.peer.active_peers.items():
+            writer = peer_info['writer']
+            try:
+                await self.peer.message_handler.send_message(writer, block)
+                logger.info(f"Broadcasted block {block.get('block_hash')} to peer {peer_id}")
+            except Exception as e:
+                logger.error(f"Failed to broadcast block to peer {peer_id}: {e}")
+
+    async def schedule_rewrite(self):
+        """
+        Schedule a rewrite of the known_peers file.
+        """
+        # Implement peer list persistence logic here
+        # This is a placeholder implementation
+        await asyncio.sleep(0)  # Replace with actual file write logic
+        logger.info("Scheduled rewrite of known_peers.")
+
+    # ----------------------------
+    # Initialization Tasks
+    # ----------------------------
+
+    async def initialize(self):
+        """
+        Initialize all necessary components for the Crypto module.
+        """
+        await self.start()
+        asyncio.create_task(self.update_trusted_certificates())

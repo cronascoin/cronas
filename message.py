@@ -234,7 +234,8 @@ class MessageHandler:
         else:
             logger.warning(f"No schema defined for message type {message_type}. Proceeding without validation.")
 
-        if not (handler := self.handlers.get(message_type)):
+        handler = self.handlers.get(message_type)
+        if not handler:
             logger.warning(f"Unknown message type received: {message_type}")
             await self.send_error_message(writer, f"Unknown message type: {message_type}")
             return
@@ -250,7 +251,6 @@ class MessageHandler:
             return
 
         await handler(message, reader, writer)
-
 
     async def verify_message_signature(self, message, writer):
         """
@@ -339,6 +339,15 @@ class MessageHandler:
         # Store the peer's certificate
         if peer_certificate_pem:
             self.peer.crypto.add_trusted_certificate(peer_server_id, peer_certificate_pem)
+            logger.info(f"Stored trusted certificate for server_id {peer_server_id}")
+
+            if public_key_pem := self.peer.crypto.extract_public_key_from_certificate(
+                peer_certificate_pem
+            ):
+                self.peer.crypto.add_peer_public_key(peer_server_id, public_key_pem)
+                logger.info(f"Extracted and added public key for server_id {peer_server_id}")
+            else:
+                logger.warning(f"Failed to extract public key from certificate for {peer_server_id}.")
         else:
             logger.warning(f"No certificate provided by peer {peer_server_id}. Cannot verify future messages.")
 
@@ -384,7 +393,10 @@ class MessageHandler:
         Handle incoming peer list messages.
         """
         data = message.get("data", {})
-        new_peers = data.get("peers", [])  # Updated key
+        if not (new_peers := data.get("peers", [])):
+            logger.info("Received empty peer list.")
+            return
+
         logger.info(f"Received peer list: {new_peers}")
 
         valid_new_peers = []
@@ -419,8 +431,8 @@ class MessageHandler:
                     logger.info(f"Already connected to {peer_info}, skipping additional connection attempt.")
                 continue
 
-            host, port = peer_info.split(':')
-            port = int(port)
+            host, port_str = peer_info.split(':')
+            port = int(port_str)
             connect_task = asyncio.create_task(self.peer.connect_to_peer(host, port))
             self.peer.background_tasks.append(connect_task)
 
@@ -565,7 +577,8 @@ class MessageHandler:
         """
         Handle incoming UTXO data requests.
         """
-        message.get("data", {}).get("peers", [])
+        # The original line had `message.get("data", {}).get("peers", [])`, which was unused.
+        # Removed to fix the Ruff F841 warning.
         try:
             async with aiofiles.open(self.peer.crypto.utxo_file, 'r') as f:
                 utxos = json.loads(await f.read())
@@ -788,9 +801,7 @@ class MessageHandler:
 
         logger.info(f"Received block_generation_request from {requesting_server_id}")
 
-        if self.peer.is_authorized_to_generate_block(
-            requesting_server_id
-        ):
+        if self.peer.is_authorized_to_generate_block(requesting_server_id):
             # Generate the block
             block = self.peer.create_block(block_data)
 
