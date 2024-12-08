@@ -242,12 +242,33 @@ def setup_logging_config(config):
     """
     log_level = config.get('log_level', 'INFO').upper()
     numeric_level = getattr(logging, log_level, logging.INFO)
-    logging.basicConfig(
-        level=numeric_level,
-        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
-    return logging.getLogger(__name__)
+    
+    # Create logger
+    logger = logging.getLogger()
+    logger.setLevel(numeric_level)
+    
+    # Remove existing handlers
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    # Create handlers
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(numeric_level)
+    
+    file_handler = logging.FileHandler('cronas.log')
+    file_handler.setLevel(numeric_level)
+    
+    # Create formatters and add to handlers
+    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+    console_handler.setFormatter(formatter)
+    file_handler.setFormatter(formatter)
+    
+    # Add handlers to the logger
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+    
+    return logger
+
 
 # ----------------------------
 # Argument Parsing
@@ -317,6 +338,7 @@ async def main(config_path):
             server_id=config.get('server_id'),
             addnode=addnode_list
         )
+        logger.info("Peer module initialized.")
 
         # Initialize MessageHandler with the peer instance
         message_handler = MessageHandler(peer=peer)
@@ -376,7 +398,7 @@ async def main(config_path):
             await crypto.shutdown()
 
             logger.info("Shutdown complete.")
-            sys.exit(0)
+            asyncio.get_event_loop().stop()
 
         # Register shutdown signals if supported
         supported_signals = ('SIGINT', 'SIGTERM')
