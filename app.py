@@ -13,6 +13,7 @@ import subprocess
 import netifaces
 import requests
 import argparse
+import platform
 
 from crypto import Crypto
 from peer import Peer
@@ -217,7 +218,6 @@ def generate_server_id(config, config_path='cronas.conf'):
         'rpc_password': generate_password(),
         'debug': 'false',
         'log_level': 'INFO',
-        # Removed hard-coded parameters from default_config
     }
 
     for key, value in default_config.items():
@@ -292,25 +292,19 @@ async def main(config_path):
         BLOCKCHAIN_JSON = 'blockchain.json'
         UTXOS_JSON = 'utxos.json'
         WALLET_FILE = 'wallet.dat'
-        CERTFILE = 'peer_certificate.crt'
-        KEYFILE = 'peer_private.key'
         HOST = '0.0.0.0'
         PORT = 4333
         RPC_HOST = 'localhost'
-        TRUSTED_CERTS_DIR = 'trusted_certs'
 
-        # Initialize Crypto module with hard-coded parameters
+        # Initialize Crypto module with necessary parameters
         crypto = Crypto(
             blockchain_file=BLOCKCHAIN_JSON,
             utxo_file=UTXOS_JSON,
-            wallet_file=WALLET_FILE,
-            certfile=CERTFILE,
-            keyfile=KEYFILE,
-            trusted_certs_dir=TRUSTED_CERTS_DIR
+            wallet_file=WALLET_FILE
         )
 
-        # Initialize Peer module with hard-coded host, port, and addnode list
-        addnode_list = config.get('addnode', [])  # Still read addnode from config
+        # Initialize Peer module
+        addnode_list = config.get('addnode', [])
 
         peer = Peer(
             host=HOST,
@@ -320,19 +314,17 @@ async def main(config_path):
             debug=config.get('debug', 'false').lower() == 'true',
             max_peers=int(config.get('maxpeers', '10')),
             server_id=config.get('server_id'),
-            addnode=addnode_list  # Pass the addnode list
+            addnode=addnode_list
         )
 
         # Initialize MessageHandler with the peer instance
         message_handler = MessageHandler(peer=peer)
-
-        # Assign the message_handler to the peer
         peer.message = message_handler
 
-        # Initialize BlockReward module with the peer instance and hard-coded parameters
+        # Initialize BlockReward module
         block_reward = BlockReward(
             crypto=crypto,
-            peer=peer,  # Pass the peer instance
+            peer=peer,
             uptime_file=UPTIME_FILE,
             reward_amount=BLOCK_REWARD_AMOUNT,
         )
@@ -341,7 +333,7 @@ async def main(config_path):
         rpc_password = config.get('rpc_password', 'securepassword')
         rpc_username = config.get('rpc_username', 'admin')
 
-        # Initialize RPC Server with hard-coded parameters
+        # Initialize RPC Server
         rpc_server = RPCServer(
             peer=peer,
             host=RPC_HOST,
@@ -350,15 +342,14 @@ async def main(config_path):
             rpc_username=rpc_username,
         )
 
-        # Start Crypto module (generates SSL certificates, initializes SSL contexts, loads data)
-        await crypto.start()
+        # Start Crypto module (loads data)
+        await crypto.initialize()
 
         # Start RPC Server
         await rpc_server.start_rpc_server()
 
-        # Connect to known peers from addnode list
+        # Connect to known peers
         for peer_address in addnode_list:
-            # Assuming peer_address is in the format "host:port"
             try:
                 addr, port = peer_address.split(':')
                 logger.info(f"Attempting to connect to peer at {addr}:{port}")
@@ -366,9 +357,7 @@ async def main(config_path):
             except ValueError:
                 logger.warning(f"Invalid peer address format: {peer_address}")
 
-        # BlockReward's uptime tracking is already started in its constructor
-
-        # Define shutdown handler
+        # Define shutdown handler inside main so it has access to rpc_server, peer, block_reward, and crypto
         async def shutdown_handler(signame):
             logger.info(f"Received signal {signame}: initiating shutdown...")
 
@@ -387,16 +376,20 @@ async def main(config_path):
             logger.info("Shutdown complete.")
             sys.exit(0)
 
-        # Register shutdown signals
-        for signame in ('SIGINT', 'SIGTERM'):
-            try:
-                asyncio.get_event_loop().add_signal_handler(
-                    getattr(signal, signame),
-                    lambda signame=signame: asyncio.create_task(shutdown_handler(signame)),
-                )
-            except NotImplementedError:
-                # Signal handlers are not available on Windows for certain signals
-                logger.warning(f"Signal {signame} not implemented on this platform.")
+        # Register shutdown signals if supported
+        supported_signals = ('SIGINT', 'SIGTERM')
+        if platform.system() != 'Windows':
+            for signame in supported_signals:
+                try:
+                    asyncio.get_running_loop().add_signal_handler(
+                        getattr(signal, signame),
+                        lambda signame=signame: asyncio.create_task(shutdown_handler(signame)),
+                    )
+                except NotImplementedError:
+                    logger.warning(f"Signal {signame} not implemented on this platform.")
+        else:
+            logger.warning("Signal handling for graceful shutdown is not fully supported on Windows.")
+            # Consider implementing an alternative shutdown mechanism if needed
 
         # Keep the application running indefinitely
         with contextlib.suppress(asyncio.CancelledError):
@@ -404,10 +397,7 @@ async def main(config_path):
 
     except Exception:
         logging.exception("An error occurred in the main function.")
-
-# ----------------------------
-# Entry Point
-# ----------------------------
+        sys.exit(1)
 
 if __name__ == '__main__':
     args = parse_args()

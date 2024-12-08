@@ -19,8 +19,6 @@ from schemas import (
     heartbeat_ack_schema,
     hello_schema,
     ack_schema,
-    broadcast_message_schema,
-    direct_message_schema,
     transaction_schema,
     daily_block_request_schema,
     daily_block_response_schema,
@@ -56,8 +54,9 @@ class MessageHandler:
             "error": self.handle_error,
             "heartbeat": self.handle_heartbeat,
             "heartbeat_ack": self.handle_heartbeat_ack,
-            "broadcast_message": self.handle_broadcast_message,
-            "direct_message": self.handle_direct_message,
+            # Removed old broadcast_message and direct_message handlers
+            # Introduce a 'chat' message type
+            "chat": self.handle_chat,
             "transaction": self.handle_transaction,
             "daily_block_request": self.handle_daily_block_request,
             "daily_block_response": self.handle_daily_block_response,
@@ -68,6 +67,7 @@ class MessageHandler:
         }
 
         # Define schemas mapping
+        # Removed broadcast_message_schema and direct_message_schema
         self.schemas = {
             "hello": hello_schema,
             "ack": ack_schema,
@@ -78,8 +78,7 @@ class MessageHandler:
             "error": error_schema,
             "heartbeat": heartbeat_schema,
             "heartbeat_ack": heartbeat_ack_schema,
-            "broadcast_message": broadcast_message_schema,
-            "direct_message": direct_message_schema,
+            # chat messages are handled without a schema here, or add a schema if desired
             "transaction": transaction_schema,
             "daily_block_request": daily_block_request_schema,
             "daily_block_response": daily_block_response_schema,
@@ -167,15 +166,16 @@ class MessageHandler:
             'type': 'hello',
             'version': self.peer.version,  # Obtained from the Peer instance
             'server_id': self.peer.server_id,  # Unique server identifier
-            'timestamp': time.time() + self.peer.ntp_offset,  # Sync offset adjustment
-            'certificate': self.peer.crypto.get_self_certificate_pem()  # Include certificate
+            'timestamp': time.time() + self.peer.ntp_offset,
+            # Instead of a certificate, send the public key
+            'public_key': self.peer.crypto.get_public_key_pem()
         }
         serialized_message = self.serialize_message(hello_message, include_signature=False)
         signature = self.peer.crypto.sign(serialized_message)
         hello_message['signature'] = base64.b64encode(signature).decode('utf-8')
         
         send_time = time.time()  # Record the send time
-        await self.send_message(writer, hello_message)  # Send the signed hello message
+        await self.send_message(writer, hello_message)
         logger.info(f"Sent signed hello message: {hello_message}")
 
         # Update active_peers with send_time for ping calculation
@@ -188,9 +188,6 @@ class MessageHandler:
     async def send_ack_message(self, writer):
         """
         Send a signed acknowledgment message to a peer.
-
-        Args:
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         ack_message = {
             "type": "ack",
@@ -208,11 +205,6 @@ class MessageHandler:
     async def process_message(self, message, reader, writer):
         """
         Process incoming messages by dispatching them to the appropriate handlers.
-
-        Args:
-            message (dict): The received message.
-            reader (StreamReader): The connection's StreamReader.
-            writer (StreamWriter): The connection's StreamWriter.
         """
         peer_info = writer.get_extra_info('peername')
         if self.peer.debug:
@@ -231,7 +223,7 @@ class MessageHandler:
                 logger.warning(f"Validation failed for message type {message_type}: {ve.message}")
                 await self.send_error_message(writer, f"Invalid message format: {ve.message}")
                 return
-        else:
+        elif message_type not in ("chat", "default"):
             logger.warning(f"No schema defined for message type {message_type}. Proceeding without validation.")
 
         handler = self.handlers.get(message_type)
@@ -242,8 +234,8 @@ class MessageHandler:
 
         # Define message types that require signature verification
         signature_required_types = {
-            "hello", "ack", "heartbeat", "heartbeat_ack", "broadcast_message",
-            "direct_message", "transaction", "daily_block_request",
+            "hello", "ack", "heartbeat", "heartbeat_ack", "chat",
+            "transaction", "daily_block_request",
             "daily_block_response", "block_generation_request", "block", "revocation"
         }
 
@@ -255,13 +247,6 @@ class MessageHandler:
     async def verify_message_signature(self, message, writer):
         """
         Verify the signature of a message that requires authentication.
-
-        Args:
-            message (dict): The message to verify.
-            writer (StreamWriter): The StreamWriter for sending error responses if needed.
-
-        Returns:
-            bool: True if the signature is valid, False otherwise.
         """
         signature_b64 = message.get("signature")
         if not signature_b64:
@@ -269,7 +254,6 @@ class MessageHandler:
             await self.send_error_message(writer, "Missing signature in message.")
             return False
 
-        # Decode the signature
         try:
             signature = base64.b64decode(signature_b64)
         except base64.binascii.Error as e:
@@ -277,25 +261,21 @@ class MessageHandler:
             await self.send_error_message(writer, "Invalid signature encoding.")
             return False
 
-        # Serialize the message without the signature for verification
         message_content = {k: v for k, v in message.items() if k != 'signature'}
         serialized_message = self.serialize_message(message_content, include_signature=False)
 
-        # Check for required server_id
         server_id = message.get('server_id')
         if not server_id:
             logger.warning("Missing server_id in message.")
             await self.send_error_message(writer, "Missing server_id in message.")
             return False
 
-        # Retrieve the peer's public key
         peer_public_key = self.peer.crypto.get_public_key(server_id)
         if not peer_public_key:
             logger.error(f"No public key found for server_id {server_id}")
             await self.send_error_message(writer, "Peer public key not found.")
             return False
 
-        # Verify the signature
         try:
             peer_public_key.verify(
                 signature,
@@ -324,7 +304,7 @@ class MessageHandler:
         peer_timestamp = message.get('timestamp', receive_time)
         peer_info = writer.get_extra_info('peername')
         peer_info_str = f"{peer_info[0]}:{peer_info[1]}"
-        peer_certificate_pem = message.get('certificate')  # Extract the certificate
+        peer_public_key_pem = message.get('public_key')  # Extract the public key
 
         # Calculate ping time
         ping = receive_time - peer_timestamp
@@ -336,20 +316,11 @@ class MessageHandler:
             await writer.wait_closed()
             return
 
-        # Store the peer's certificate
-        if peer_certificate_pem:
-            self.peer.crypto.add_trusted_certificate(peer_server_id, peer_certificate_pem)
-            logger.info(f"Stored trusted certificate for server_id {peer_server_id}")
-
-            if public_key_pem := self.peer.crypto.extract_public_key_from_certificate(
-                peer_certificate_pem
-            ):
-                self.peer.crypto.add_peer_public_key(peer_server_id, public_key_pem)
-                logger.info(f"Extracted and added public key for server_id {peer_server_id}")
-            else:
-                logger.warning(f"Failed to extract public key from certificate for {peer_server_id}.")
+        # Store the peer's public key
+        if peer_public_key_pem:
+            self.peer.crypto.add_peer_public_key(peer_server_id, peer_public_key_pem)
         else:
-            logger.warning(f"No certificate provided by peer {peer_server_id}. Cannot verify future messages.")
+            logger.warning(f"No public key provided by peer {peer_server_id}. Cannot verify their messages.")
 
         # Send ack message
         await self.send_ack_message(writer)
@@ -362,7 +333,7 @@ class MessageHandler:
             peer_server_id,
             peer_info[0],
             peer_info[1],
-            peer_info[1],  # Assuming bound_port is the same as local_port
+            peer_info[1],
             peer_version,
             ping,
         )
@@ -377,13 +348,12 @@ class MessageHandler:
         remote_server_id = message.get("server_id", "unknown")
 
         local_addr, local_port = writer.get_extra_info('sockname')
-        bound_port = local_port  # Assuming p2p_port is the same as local_port
+        bound_port = local_port
 
         receive_time = time.time()
         send_time = self.peer.active_peers.get(remote_server_id, {}).get('send_time', receive_time)
         ping = receive_time - send_time
 
-        # Register the connection
         await self.peer.register_peer_connection(
             reader, writer, peer_info, remote_server_id, local_addr, local_port, bound_port, remote_version, ping
         )
@@ -393,10 +363,7 @@ class MessageHandler:
         Handle incoming peer list messages.
         """
         data = message.get("data", {})
-        if not (new_peers := data.get("peers", [])):
-            logger.info("Received empty peer list.")
-            return
-
+        new_peers = data.get("peers", [])
         logger.info(f"Received peer list: {new_peers}")
 
         valid_new_peers = []
@@ -405,26 +372,23 @@ class MessageHandler:
         for peer_info in new_peers:
             if not self.peer.is_valid_peer(peer_info):
                 invalid_peers.append(peer_info)
-                continue  # Skip invalid peers
+                continue
 
             if peer_info == f"{self.peer.host}:{self.peer.port}":
                 logger.info(f"Skipping self-peer: {peer_info}")
-                continue  # Skip adding self-peer to valid_new_peers
+                continue
 
             valid_new_peers.append(peer_info)
 
-        # Log invalid peers if debugging
         if self.peer.debug:
             for invalid_peer in invalid_peers:
                 logger.warning(f"Invalid peer received: {invalid_peer}")
 
-        # Update peers and schedule file rewrite
         if valid_new_peers:
             for peer in valid_new_peers:
                 self.peer.known_peers.add(peer)
             await self.peer.schedule_rewrite()
 
-        # Try connecting to valid new peers, excluding the self-peer
         for peer_info in valid_new_peers:
             if peer_info in self.peer.active_peers:
                 if self.peer.debug:
@@ -436,23 +400,23 @@ class MessageHandler:
             connect_task = asyncio.create_task(self.peer.connect_to_peer(host, port))
             self.peer.background_tasks.append(connect_task)
 
-        # Update active peers after connecting
         self.peer.update_active_peers()
 
     async def handle_getblockchain(self, message, reader, writer):
         """
         Handle incoming requests for blockchain data.
         """
+        # Implementation unchanged from original, except no TLS references
         data = message.get("data", {})
         start_byte = data.get("start_byte", 0)
-        chunk_size = data.get("chunk_size", 1048576)  # 1MB
+        chunk_size = data.get("chunk_size", 1048576)
+
         try:
             async with aiofiles.open(self.peer.crypto.blockchain_file, 'rb') as f:
                 await f.seek(start_byte)
                 chunk = await f.read(chunk_size)
                 is_last_chunk = len(chunk) < chunk_size
 
-            # Compress the chunk using gzip
             compressed_chunk = gzip.compress(chunk)
             checksum = hashlib.sha256(compressed_chunk).hexdigest()
             response = {
@@ -462,11 +426,10 @@ class MessageHandler:
                     "start_byte": start_byte,
                     "end_byte": start_byte + len(compressed_chunk),
                     "is_last_chunk": is_last_chunk,
-                    "checksum": checksum  # Added checksum
+                    "checksum": checksum
                 }
             }
 
-            # Serialize and sign the response
             serialized_response = self.serialize_message(response, include_signature=False)
             signature = self.peer.crypto.sign(serialized_response)
             response['signature'] = base64.b64encode(signature).decode('utf-8')
@@ -481,17 +444,16 @@ class MessageHandler:
                     "message": "Blockchain file not found."
                 }
             }
-            # Serialize and sign the error message
             serialized_error = self.serialize_message(error_response, include_signature=False)
             signature = self.peer.crypto.sign(serialized_error)
             error_response['signature'] = base64.b64encode(signature).decode('utf-8')
-
             await self.send_message(writer, error_response)
 
     async def handle_blockchain_chunk(self, message, reader, writer):
         """
         Handle incoming blockchain data chunks.
         """
+        # Implementation unchanged from original, except no TLS references
         data = message.get("data", {})
         chunk_base64 = data.get("chunk", "")
         start_byte = data.get("start_byte", 0)
@@ -502,14 +464,12 @@ class MessageHandler:
 
         try:
             compressed_chunk = base64.b64decode(chunk_base64)
-            # Compute checksum of the received compressed chunk
             computed_checksum = hashlib.sha256(compressed_chunk).hexdigest()
             if computed_checksum != received_checksum:
                 logger.error(f"Checksum mismatch for chunk {start_byte}-{end_byte} from {peer_id}.")
                 await self.send_error_message(writer, "Checksum mismatch. Chunk corrupted.", resend=True, start_byte=start_byte, chunk_size=end_byte - start_byte)
-                return  # Stop processing this chunk
+                return
 
-            # Decompress the chunk
             try:
                 chunk = gzip.decompress(compressed_chunk)
             except gzip.BadGzipFile as e:
@@ -517,48 +477,39 @@ class MessageHandler:
                 await self.send_error_message(writer, "Failed to decompress chunk.", resend=True, start_byte=start_byte, chunk_size=end_byte - start_byte)
                 return
 
-            # Store the chunk in cache
             if (start_byte, end_byte) not in self.peer.chunk_cache:
                 self.peer.chunk_cache[(start_byte, end_byte)] = {}
             self.peer.chunk_cache[(start_byte, end_byte)][peer_id] = chunk
 
-            # Check for data redundancy (verify with multiple peers)
             if len(self.peer.chunk_cache[(start_byte, end_byte)]) >= 2:
-                # Verify majority
                 chunks = list(self.peer.chunk_cache[(start_byte, end_byte)].values())
                 chunk_counts = {}
                 for c in chunks:
                     c_hash = hashlib.sha256(c).hexdigest()
                     chunk_counts[c_hash] = chunk_counts.get(c_hash, 0) + 1
 
-                # Find the chunk with the highest count
                 verified_chunk_hash = max(chunk_counts, key=chunk_counts.get)
                 verified_chunks = [c for c in chunks if hashlib.sha256(c).hexdigest() == verified_chunk_hash]
 
                 if len(verified_chunks) >= 2:
-                    # Save the verified chunk
                     await self.save_chunk(start_byte, end_byte, verified_chunks[0], writer)
-                    # Remove the chunk from cache
                     del self.peer.chunk_cache[(start_byte, end_byte)]
                     logger.info(f"Chunk {start_byte}-{end_byte} verified by majority and saved.")
                 else:
-                    # Conflict persists; request resend from peers
                     logger.warning(f"Checksum discrepancies persist for chunk {start_byte}-{end_byte}. Requesting resend.")
                     await self.send_error_message(writer, "Checksum discrepancies. Requesting resend.", resend=True, start_byte=start_byte, chunk_size=end_byte - start_byte)
             else:
                 logger.info(f"Awaiting more sources for chunk {start_byte}-{end_byte}.")
 
                 if not is_last_chunk:
-                    # Request the next chunk
                     next_start = end_byte
                     request = {
                         "type": "getblockchain",
                         "data": {
                             "start_byte": next_start,
-                            "chunk_size": 1048576  # 1MB
+                            "chunk_size": 1048576
                         }
                     }
-                    # Serialize and sign the request
                     serialized_request = self.serialize_message(request, include_signature=False)
                     signature = self.peer.crypto.sign(serialized_request)
                     request['signature'] = base64.b64encode(signature).decode('utf-8')
@@ -567,7 +518,6 @@ class MessageHandler:
                     logger.info(f"Requested next blockchain chunk starting at byte {next_start}")
                 else:
                     logger.info("Completed receiving blockchain data.")
-                    # After receiving the full blockchain, request UTXO data
                     await self.request_utxo(writer)
         except base64.binascii.Error as e:
             logger.error(f"Failed to decode blockchain chunk: {e}")
@@ -577,8 +527,6 @@ class MessageHandler:
         """
         Handle incoming UTXO data requests.
         """
-        # The original line had `message.get("data", {}).get("peers", [])`, which was unused.
-        # Removed to fix the Ruff F841 warning.
         try:
             async with aiofiles.open(self.peer.crypto.utxo_file, 'r') as f:
                 utxos = json.loads(await f.read())
@@ -588,7 +536,6 @@ class MessageHandler:
                     "utxos": utxos
                 }
             }
-            # Serialize and sign the response
             serialized_response = self.serialize_message(response, include_signature=False)
             signature = self.peer.crypto.sign(serialized_response)
             response['signature'] = base64.b64encode(signature).decode('utf-8')
@@ -603,7 +550,6 @@ class MessageHandler:
                     "message": "UTXO file not found."
                 }
             }
-            # Serialize and sign the error message
             serialized_error = self.serialize_message(error_response, include_signature=False)
             signature = self.peer.crypto.sign(serialized_error)
             error_response['signature'] = base64.b64encode(signature).decode('utf-8')
@@ -630,7 +576,7 @@ class MessageHandler:
         """
         data = message.get("data", {})
         start_byte = data.get("start_byte", 0)
-        chunk_size = data.get("chunk_size", 1048576)  # 1MB
+        chunk_size = data.get("chunk_size", 1048576)
         logger.info(f"Received resend request for chunk starting at {start_byte} with size {chunk_size}")
         request = {
             "type": "getblockchain",
@@ -639,7 +585,6 @@ class MessageHandler:
                 "chunk_size": chunk_size
             }
         }
-        # Serialize and sign the request
         serialized_request = self.serialize_message(request, include_signature=False)
         signature = self.peer.crypto.sign(serialized_request)
         request['signature'] = base64.b64encode(signature).decode('utf-8')
@@ -654,7 +599,6 @@ class MessageHandler:
         data = message.get("data", {})
         error_message = data.get("message", "Unknown error.")
         logger.warning(f"Received error from peer: {error_message}")
-        # Implement further error handling as needed
 
     async def handle_heartbeat(self, message, reader, writer):
         """
@@ -667,7 +611,6 @@ class MessageHandler:
 
         logger.info(f"Received heartbeat from {peer_server_id} with uptime {uptime} and timestamp {timestamp}")
 
-        # Update heartbeat records in Peer
         if peer_server_id not in self.peer.heartbeat_records:
             self.peer.heartbeat_records[peer_server_id] = []
         self.peer.heartbeat_records[peer_server_id].append({
@@ -675,10 +618,8 @@ class MessageHandler:
             "timestamp": timestamp
         })
 
-        # Optionally, update uptime
-        self.peer.uptime = uptime  # Assuming Peer has an 'uptime' attribute
+        self.peer.uptime = uptime
 
-        # Send heartbeat acknowledgment
         heartbeat_ack = {
             "type": "heartbeat_ack",
             "data": {
@@ -686,7 +627,6 @@ class MessageHandler:
                 "timestamp": time.time() + self.peer.ntp_offset
             }
         }
-        # Serialize and sign the heartbeat_ack message
         serialized_ack = self.serialize_message(heartbeat_ack, include_signature=False)
         signature = self.peer.crypto.sign(serialized_ack)
         heartbeat_ack['signature'] = base64.b64encode(signature).decode('utf-8')
@@ -704,24 +644,19 @@ class MessageHandler:
 
         logger.info(f"Received heartbeat acknowledgment from {peer_server_id} at {timestamp}: Verified=True")
 
-        # Update last seen timestamp or other relevant information
         if peer_server_id in self.peer.active_peers:
             self.peer.active_peers[peer_server_id]['last_seen'] = int(timestamp)
             logger.debug(f"Updated last seen for {peer_server_id} to {timestamp}")
         else:
             logger.warning(f"Received heartbeat_ack from unknown peer {peer_server_id}")
 
-    async def handle_broadcast_message(self, message, reader, writer):
+    async def handle_chat(self, message, reader, writer):
         """
-        Handle incoming broadcast messages.
+        Handle incoming chat messages.
         """
-        await self.peer.handle_incoming_chat_message(message)
-
-    async def handle_direct_message(self, message, reader, writer):
-        """
-        Handle incoming direct messages.
-        """
-        await self.peer.handle_incoming_chat_message(message)
+        data = message.get("data", {})
+        # Forward the message data to the Peer method for handling chat logic
+        await self.peer.handle_incoming_chat_message(data)
 
     async def handle_transaction(self, message, reader, writer):
         """
@@ -751,10 +686,8 @@ class MessageHandler:
 
         logger.info(f"Received daily_block_request from {requesting_server_id} at {timestamp}")
 
-        # Verify that the requesting node has been up all day
         is_verified = self.peer.verify_uptime(requesting_server_id)
 
-        # Prepare the response
         response = {
             "type": "daily_block_response",
             "data": {
@@ -764,12 +697,10 @@ class MessageHandler:
             }
         }
 
-        # Serialize and sign the response
         serialized_response = self.serialize_message(response, include_signature=False)
         signature = self.peer.crypto.sign(serialized_response)
         response['signature'] = base64.b64encode(signature).decode('utf-8')
 
-        # Send the response
         await self.send_message(writer, response)
         logger.info(f"Sent daily_block_response to {requesting_server_id}: Verified={is_verified}")
 
@@ -784,10 +715,8 @@ class MessageHandler:
 
         logger.info(f"Received daily_block_response from {server_id} at {timestamp}: Verified={verified}")
 
-        # Record the verification with server_id and timestamp
         self.peer.record_block_verification(server_id, verified, timestamp)
 
-        # Check if enough verifications have been received to generate a block
         if self.peer.can_generate_block():
             await self.peer.generate_and_broadcast_block()
 
@@ -802,15 +731,11 @@ class MessageHandler:
         logger.info(f"Received block_generation_request from {requesting_server_id}")
 
         if self.peer.is_authorized_to_generate_block(requesting_server_id):
-            # Generate the block
             block = self.peer.create_block(block_data)
-
-            # Broadcast the block to all peers
             await self.peer.broadcast_block(block)
             logger.info(f"Block generated and broadcasted by {requesting_server_id}")
         else:
             logger.warning(f"Unauthorized block_generation_request from {requesting_server_id}")
-            # Send an error message
             await self.send_error_message(writer, "Unauthorized to generate block.")
 
     async def handle_block(self, message, reader, writer):
@@ -825,12 +750,10 @@ class MessageHandler:
         logger.info(f"Received block with hash {block_hash} from {block_data.get('generator')} at {timestamp}")
 
         if self.peer.verify_block(block_data):
-            # Add the block to the blockchain
             self.peer.crypto.blockchain.append(data)
             await self.peer.crypto._save_to_file(self.peer.crypto.blockchain_file, self.peer.crypto.blockchain)
             logger.info(f"Block {block_hash} added to the blockchain.")
 
-            # Handle block votes and rewards
             if block_hash not in self.peer.block_votes:
                 self.peer.block_votes[block_hash] = 0
             self.peer.block_votes[block_hash] += 1
@@ -857,24 +780,16 @@ class MessageHandler:
 
         logger.info(f"Received revocation for server_id {revoked_server_id} at {timestamp}: Reason={reason}")
 
-        # Verify the revocation message's signature
-        # Assuming revocations are only sent by trusted authority nodes
-        # Implement authority checks here
-
-        # Example: Check if the revocation is sent by a trusted authority
-        authority_ids = self.peer.get_authority_ids()  # Implement this method in Peer
+        authority_ids = self.peer.get_authority_ids()
         sender_server_id = message.get("server_id")
         if sender_server_id not in authority_ids:
             logger.warning(f"Revocation message from unauthorized server_id {sender_server_id}. Ignoring.")
             await self.send_error_message(writer, "Unauthorized to send revocation.")
             return
 
-        # Process the revocation
-        # Remove the peer from active_peers and known_peers
         if revoked_server_id in self.peer.active_peers:
             peer_info = self.peer.active_peers.pop(revoked_server_id)
             if (writer_to_close := peer_info.get('writer')):
-                # Close the writer if it exists
                 writer_to_close.close()
                 await writer_to_close.wait_closed()
                 logger.info(f"Closed connection with revoked peer {revoked_server_id}")
@@ -883,7 +798,6 @@ class MessageHandler:
             self.peer.known_peers.remove(revoked_server_id)
             logger.info(f"Removed revoked peer {revoked_server_id} from known peers")
 
-        # Broadcast the revocation to other peers
         await self.peer.broadcast_message(message)
         logger.info(f"Broadcasted revocation of {revoked_server_id} to other peers")
 
@@ -900,12 +814,6 @@ class MessageHandler:
     async def save_chunk(self, start_byte, end_byte, chunk, writer):
         """
         Save the verified chunk to the blockchain file.
-
-        Args:
-            start_byte (int): Start byte of the chunk.
-            end_byte (int): End byte of the chunk.
-            chunk (bytes): The chunk data.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         try:
             async with aiofiles.open(self.peer.crypto.blockchain_file, 'ab') as f:
@@ -919,13 +827,6 @@ class MessageHandler:
     async def send_error_message(self, writer, error_message, resend=False, start_byte=None, chunk_size=None):
         """
         Send a signed error message to the peer, optionally requesting a resend.
-
-        Args:
-            writer (StreamWriter): The StreamWriter object for the connection.
-            error_message (str): The error message to send.
-            resend (bool): Whether to request a resend.
-            start_byte (int): The start byte for the chunk to resend.
-            chunk_size (int): The size of the chunk to resend.
         """
         error_msg = {
             "type": "error",
@@ -933,7 +834,6 @@ class MessageHandler:
                 "message": error_message
             }
         }
-        # Serialize and sign the error message
         serialized_error = self.serialize_message(error_msg, include_signature=False)
         signature = self.peer.crypto.sign(serialized_error)
         error_msg['signature'] = base64.b64encode(signature).decode('utf-8')
@@ -955,7 +855,6 @@ class MessageHandler:
                     "chunk_size": chunk_size
                 }
             }
-            # Serialize and sign the resend request
             serialized_resend = self.serialize_message(resend_request, include_signature=False)
             resend_signature = self.peer.crypto.sign(serialized_resend)
             resend_request['signature'] = base64.b64encode(resend_signature).decode('utf-8')
@@ -963,7 +862,6 @@ class MessageHandler:
             await self.send_message(writer, resend_request)
             logger.info(f"Sent signed resend request for chunk starting at byte {start_byte} with size {chunk_size}")
 
-    # Heartbeat Methods
     async def send_heartbeats(self):
         """
         Periodically send signed heartbeat messages to all connected peers.
@@ -981,10 +879,9 @@ class MessageHandler:
                     "data": {
                         "server_id": self.peer.server_id,
                         "timestamp": time.time() + self.peer.ntp_offset,
-                        "uptime": self.peer.uptime  # Assuming Peer has an 'uptime' attribute
+                        "uptime": self.peer.uptime
                     }
                 }
-                # Serialize and sign the heartbeat message
                 serialized_heartbeat = self.serialize_message(heartbeat_message, include_signature=False)
                 signature = self.peer.crypto.sign(serialized_heartbeat)
                 heartbeat_message['signature'] = base64.b64encode(signature).decode('utf-8')
@@ -993,5 +890,4 @@ class MessageHandler:
                     logger.debug(f"Sent signed heartbeat to {peer_id}")
                 except Exception as e:
                     logger.error(f"Failed to send heartbeat to {peer_id}: {e}")
-                    # Optionally, mark the peer as unresponsive
                     self.peer.mark_peer_unresponsive(peer_id)  # Implement this method in Peer
