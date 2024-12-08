@@ -26,8 +26,10 @@ from schemas import (
     daily_block_response_schema,
     block_generation_request_schema,
     block_schema,
-    revocation_schema  # Ensure this is imported
+    revocation_schema
 )
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +39,10 @@ class MessageHandler:
         Initialize the MessageHandler with a reference to the Peer instance.
         """
         self.peer = peer
-        self.seen_message_ids = set()  # To track processed message IDs
-
+        self.seen_message_ids = {}  # Dictionary to track processed message IDs and their timestamps
+        self.resend_attempts = {}   # Dictionary to track resend attempts per chunk
+        self.max_resend_attempts = 3  # Maximum number of resend attempts per chunk
+    
         # Define handlers mapping
         self.handlers = {
             "hello": self.handle_hello,
@@ -59,8 +63,8 @@ class MessageHandler:
             "daily_block_response": self.handle_daily_block_response,
             "block_generation_request": self.handle_block_generation_request,
             "block": self.handle_block,
-            "revocation": self.handle_revocation,  # Added revocation handler
-            # Add other handlers as needed
+            "revocation": self.handle_revocation,
+            "default": self.handle_default  # Default handler for unknown types
         }
 
         # Define schemas mapping
@@ -81,8 +85,7 @@ class MessageHandler:
             "daily_block_response": daily_block_response_schema,
             "block_generation_request": block_generation_request_schema,
             "block": block_schema,
-            "revocation": revocation_schema,  # Added revocation schema
-            # Add other schemas as needed
+            "revocation": revocation_schema,
         }
 
         # Initialize heartbeat task
@@ -165,7 +168,7 @@ class MessageHandler:
             'version': self.peer.version,  # Obtained from the Peer instance
             'server_id': self.peer.server_id,  # Unique server identifier
             'timestamp': time.time() + self.peer.ntp_offset,  # Sync offset adjustment
-            'public_key': self.peer.crypto.public_key  # Include public key
+            'certificate': self.peer.crypto.get_self_certificate_pem()  # Include certificate
         }
         serialized_message = self.serialize_message(hello_message, include_signature=False)
         signature = self.peer.crypto.sign(serialized_message)
@@ -193,7 +196,7 @@ class MessageHandler:
             "type": "ack",
             "version": self.peer.version,
             "server_id": self.peer.server_id,
-            "timestamp": time.time() + self.peer.crypto.ntp_offset
+            "timestamp": time.time() + self.peer.ntp_offset
         }
         serialized_message = self.serialize_message(ack_message, include_signature=False)
         signature = self.peer.crypto.sign(serialized_message)
@@ -203,26 +206,25 @@ class MessageHandler:
         logger.info(f"Sent signed ack message to peer with server_id: {self.peer.server_id}")
 
     async def process_message(self, message, reader, writer):
-        # sourcery skip: use-named-expression
         """
-        Process incoming messages by dispatching them to appropriate handlers.
+        Process incoming messages by dispatching them to the appropriate handlers.
 
         Args:
             message (dict): The received message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
+            reader (StreamReader): The connection's StreamReader.
+            writer (StreamWriter): The connection's StreamWriter.
         """
         peer_info = writer.get_extra_info('peername')
         if self.peer.debug:
             logger.info(f"Received message from {peer_info}: {message}")
 
-        if not (message_type := message.get("type")):
-            # Check for message type
+        message_type = message.get("type")
+        if not message_type:
             logger.warning("Received message without a type.")
             await self.send_error_message(writer, "Message type missing.")
             return
 
-        if (schema := self.schemas.get(message_type)):
+        if schema := self.schemas.get(message_type):
             try:
                 validate(instance=message, schema=schema)
             except ValidationError as ve:
@@ -232,63 +234,89 @@ class MessageHandler:
         else:
             logger.warning(f"No schema defined for message type {message_type}. Proceeding without validation.")
 
-        if (handler := self.handlers.get(message_type)):
-            # Define message types that require signature verification
-            signature_required_types = [
-                "hello", "ack", "heartbeat", "heartbeat_ack",
-                "broadcast_message", "direct_message", "transaction",
-                "daily_block_request", "daily_block_response",
-                "block_generation_request", "block",
-                "revocation"  # Added revocation to require signature
-            ]
-
-            if message_type in signature_required_types:
-                if not (signature_b64 := message.get("signature")):
-                    logger.warning(f"Missing signature in {message_type} message.")
-                    await self.send_error_message(writer, "Missing signature in message.")
-                    return
-                try:
-                    signature = base64.b64decode(signature_b64)
-                except base64.binascii.Error as e:
-                    logger.warning(f"Invalid signature encoding: {e}")
-                    await self.send_error_message(writer, "Invalid signature encoding.")
-                    return
-
-                # Serialize the message without the signature for verification
-                serialized_message = self.serialize_message(message, include_signature=False)
-
-                # Get server_id to retrieve their public key
-                if not (server_id := message.get('server_id')):
-                    # Check for server_id
-                    logger.warning("Missing server_id in message.")
-                    await self.send_error_message(writer, "Missing server_id in message.")
-                    return
-
-                # Verify the signature using the peer's public key
-                is_valid = self.peer.crypto.verify(
-                    serialized_message, signature, server_id
-                )
-                if is_valid:
-                    logger.debug(f"Valid signature for message type {message_type} from {server_id}.")
-                else:
-                    logger.warning(f"Invalid signature for message type {message_type} from {server_id}.")
-                    await self.send_error_message(writer, "Invalid signature.")
-                    return
-
-            await handler(message, reader, writer)
-        else:
+        if not (handler := self.handlers.get(message_type)):
             logger.warning(f"Unknown message type received: {message_type}")
             await self.send_error_message(writer, f"Unknown message type: {message_type}")
+            return
+
+        # Define message types that require signature verification
+        signature_required_types = {
+            "hello", "ack", "heartbeat", "heartbeat_ack", "broadcast_message",
+            "direct_message", "transaction", "daily_block_request",
+            "daily_block_response", "block_generation_request", "block", "revocation"
+        }
+
+        if message_type in signature_required_types and not await self.verify_message_signature(message, writer):
+            return
+
+        await handler(message, reader, writer)
+
+
+    async def verify_message_signature(self, message, writer):
+        """
+        Verify the signature of a message that requires authentication.
+
+        Args:
+            message (dict): The message to verify.
+            writer (StreamWriter): The StreamWriter for sending error responses if needed.
+
+        Returns:
+            bool: True if the signature is valid, False otherwise.
+        """
+        signature_b64 = message.get("signature")
+        if not signature_b64:
+            logger.warning(f"Missing signature in {message['type']} message.")
+            await self.send_error_message(writer, "Missing signature in message.")
+            return False
+
+        # Decode the signature
+        try:
+            signature = base64.b64decode(signature_b64)
+        except base64.binascii.Error as e:
+            logger.warning(f"Invalid signature encoding: {e}")
+            await self.send_error_message(writer, "Invalid signature encoding.")
+            return False
+
+        # Serialize the message without the signature for verification
+        message_content = {k: v for k, v in message.items() if k != 'signature'}
+        serialized_message = self.serialize_message(message_content, include_signature=False)
+
+        # Check for required server_id
+        server_id = message.get('server_id')
+        if not server_id:
+            logger.warning("Missing server_id in message.")
+            await self.send_error_message(writer, "Missing server_id in message.")
+            return False
+
+        # Retrieve the peer's public key
+        peer_public_key = self.peer.crypto.get_public_key(server_id)
+        if not peer_public_key:
+            logger.error(f"No public key found for server_id {server_id}")
+            await self.send_error_message(writer, "Peer public key not found.")
+            return False
+
+        # Verify the signature
+        try:
+            peer_public_key.verify(
+                signature,
+                serialized_message,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                hashes.SHA256()
+            )
+            logger.debug(f"Valid signature for message type {message['type']} from {server_id}.")
+            return True
+        except Exception as e:
+            logger.warning(f"Invalid signature for message type {message['type']} from {server_id}: {e}")
+            await self.send_error_message(writer, "Invalid signature.")
+            return False
 
     # Handler Methods
     async def handle_hello(self, message, reader, writer):
         """
         Handle incoming signed hello messages.
-
-        Args:
-            message (dict): The received hello message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         receive_time = time.time()
         peer_server_id = message['server_id']
@@ -296,7 +324,7 @@ class MessageHandler:
         peer_timestamp = message.get('timestamp', receive_time)
         peer_info = writer.get_extra_info('peername')
         peer_info_str = f"{peer_info[0]}:{peer_info[1]}"
-        peer_public_key_pem = message.get('public_key')  # Extract the public key
+        peer_certificate_pem = message.get('certificate')  # Extract the certificate
 
         # Calculate ping time
         ping = receive_time - peer_timestamp
@@ -308,11 +336,11 @@ class MessageHandler:
             await writer.wait_closed()
             return
 
-        # Store the peer's public key
-        if peer_public_key_pem:
-            self.peer.crypto.add_peer_public_key(peer_server_id, peer_public_key_pem)
+        # Store the peer's certificate
+        if peer_certificate_pem:
+            self.peer.crypto.add_trusted_certificate(peer_server_id, peer_certificate_pem)
         else:
-            logger.warning(f"No public key provided by peer {peer_server_id}. Cannot verify future messages.")
+            logger.warning(f"No certificate provided by peer {peer_server_id}. Cannot verify future messages.")
 
         # Send ack message
         await self.send_ack_message(writer)
@@ -333,11 +361,6 @@ class MessageHandler:
     async def handle_ack(self, message, reader, writer):
         """
         Handle incoming signed ack messages.
-
-        Args:
-            message (dict): The received ack message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         addr = writer.get_extra_info('peername')
         peer_info = f"{addr[0]}:{addr[1]}"
@@ -359,11 +382,6 @@ class MessageHandler:
     async def handle_peer_list(self, message, reader, writer):
         """
         Handle incoming peer list messages.
-
-        Args:
-            message (dict): The received peer list message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         data = message.get("data", {})
         new_peers = data.get("peers", [])  # Updated key
@@ -412,11 +430,6 @@ class MessageHandler:
     async def handle_getblockchain(self, message, reader, writer):
         """
         Handle incoming requests for blockchain data.
-
-        Args:
-            message (dict): The received getblockchain message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         data = message.get("data", {})
         start_byte = data.get("start_byte", 0)
@@ -466,11 +479,6 @@ class MessageHandler:
     async def handle_blockchain_chunk(self, message, reader, writer):
         """
         Handle incoming blockchain data chunks.
-
-        Args:
-            message (dict): The received blockchain_chunk message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         data = message.get("data", {})
         chunk_base64 = data.get("chunk", "")
@@ -556,13 +564,8 @@ class MessageHandler:
     async def handle_get_utxo(self, message, reader, writer):
         """
         Handle incoming UTXO data requests.
-
-        Args:
-            message (dict): The received getutxo message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
-
+        message.get("data", {}).get("peers", [])
         try:
             async with aiofiles.open(self.peer.crypto.utxo_file, 'r') as f:
                 utxos = json.loads(await f.read())
@@ -597,11 +600,6 @@ class MessageHandler:
     async def handle_utxo_data(self, message, reader, writer):
         """
         Handle incoming UTXO data.
-
-        Args:
-            message (dict): The received utxo_data message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         data = message.get("data", {})
         utxos = data.get("utxos", [])
@@ -616,11 +614,6 @@ class MessageHandler:
     async def handle_resend_chunk(self, message, reader, writer):
         """
         Handle incoming resend_chunk messages.
-
-        Args:
-            message (dict): The received resend_chunk message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         data = message.get("data", {})
         start_byte = data.get("start_byte", 0)
@@ -644,11 +637,6 @@ class MessageHandler:
     async def handle_error(self, message, reader, writer):
         """
         Handle incoming error messages.
-
-        Args:
-            message (dict): The received error message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         data = message.get("data", {})
         error_message = data.get("message", "Unknown error.")
@@ -658,11 +646,6 @@ class MessageHandler:
     async def handle_heartbeat(self, message, reader, writer):
         """
         Handle incoming signed heartbeat messages.
-
-        Args:
-            message (dict): The received heartbeat message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         data = message.get("data", {})
         peer_server_id = data.get("server_id")
@@ -687,7 +670,7 @@ class MessageHandler:
             "type": "heartbeat_ack",
             "data": {
                 "server_id": self.peer.server_id,
-                "timestamp": time.time() + self.peer.crypto.ntp_offset
+                "timestamp": time.time() + self.peer.ntp_offset
             }
         }
         # Serialize and sign the heartbeat_ack message
@@ -701,17 +684,12 @@ class MessageHandler:
     async def handle_heartbeat_ack(self, message, reader, writer):
         """
         Handle incoming signed heartbeat acknowledgment messages.
-
-        Args:
-            message (dict): The received heartbeat_ack message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         data = message.get("data", {})
         peer_server_id = data.get("server_id")
         timestamp = data.get("timestamp", time.time())
 
-        logger.info(f"Received heartbeat acknowledgment from {peer_server_id} at {timestamp}")
+        logger.info(f"Received heartbeat acknowledgment from {peer_server_id} at {timestamp}: Verified=True")
 
         # Update last seen timestamp or other relevant information
         if peer_server_id in self.peer.active_peers:
@@ -723,33 +701,18 @@ class MessageHandler:
     async def handle_broadcast_message(self, message, reader, writer):
         """
         Handle incoming broadcast messages.
-
-        Args:
-            message (dict): The received broadcast_message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         await self.peer.handle_incoming_chat_message(message)
 
     async def handle_direct_message(self, message, reader, writer):
         """
         Handle incoming direct messages.
-
-        Args:
-            message (dict): The received direct_message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         await self.peer.handle_incoming_chat_message(message)
 
     async def handle_transaction(self, message, reader, writer):
         """
         Handle incoming transaction messages.
-
-        Args:
-            message (dict): The received transaction message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         txid = message.get("data", {}).get("txid")
         if not txid:
@@ -761,18 +724,13 @@ class MessageHandler:
             logger.info(f"Duplicate transaction {txid} received. Ignoring.")
             return
 
-        self.seen_message_ids.add(txid)
+        self.seen_message_ids[txid] = time.time()  # Record the timestamp
 
         await self.peer.handle_incoming_transaction(message)
 
     async def handle_daily_block_request(self, message, reader, writer):
         """
         Handle incoming daily_block_request messages.
-
-        Args:
-            message (dict): The received daily_block_request message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         data = message.get("data", {})
         requesting_server_id = data.get("server_id")
@@ -789,7 +747,7 @@ class MessageHandler:
             "data": {
                 "server_id": self.peer.server_id,
                 "verified": is_verified,
-                "timestamp": time.time() + self.peer.crypto.ntp_offset
+                "timestamp": time.time() + self.peer.ntp_offset
             }
         }
 
@@ -805,11 +763,6 @@ class MessageHandler:
     async def handle_daily_block_response(self, message, reader, writer):
         """
         Handle incoming daily_block_response messages.
-
-        Args:
-            message (dict): The received daily_block_response message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         data = message.get("data", {})
         server_id = data.get("server_id")
@@ -826,14 +779,8 @@ class MessageHandler:
             await self.peer.generate_and_broadcast_block()
 
     async def handle_block_generation_request(self, message, reader, writer):
-        # sourcery skip: use-named-expression
         """
         Handle incoming block_generation_request messages.
-
-        Args:
-            message (dict): The received block_generation_request message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         data = message.get("data", {})
         requesting_server_id = data.get("server_id")
@@ -841,9 +788,9 @@ class MessageHandler:
 
         logger.info(f"Received block_generation_request from {requesting_server_id}")
 
-        # Check authorization
-        is_valid = self.peer.is_authorized_to_generate_block(requesting_server_id)
-        if is_valid:
+        if self.peer.is_authorized_to_generate_block(
+            requesting_server_id
+        ):
             # Generate the block
             block = self.peer.create_block(block_data)
 
@@ -856,14 +803,8 @@ class MessageHandler:
             await self.send_error_message(writer, "Unauthorized to generate block.")
 
     async def handle_block(self, message, reader, writer):
-        # sourcery skip: use-named-expression
         """
         Handle incoming block messages.
-
-        Args:
-            message (dict): The received block message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
         data = message.get("data", {})
         block_hash = data.get("block_hash")
@@ -872,9 +813,7 @@ class MessageHandler:
 
         logger.info(f"Received block with hash {block_hash} from {block_data.get('generator')} at {timestamp}")
 
-        # Verify the block
-        is_valid = self.peer.verify_block(block_data)
-        if is_valid:
+        if self.peer.verify_block(block_data):
             # Add the block to the blockchain
             self.peer.crypto.blockchain.append(data)
             await self.peer.crypto._save_to_file(self.peer.crypto.blockchain_file, self.peer.crypto.blockchain)
@@ -894,28 +833,30 @@ class MessageHandler:
     async def handle_revocation(self, message, reader, writer):
         """
         Handle incoming revocation messages.
-
-        Args:
-            message (dict): The received revocation message.
-            reader (StreamReader): The StreamReader object for the connection.
-            writer (StreamWriter): The StreamWriter object for the connection.
         """
-        if not (data := message.get("data", {})):
-            # Check if data is present
-            logger.warning("Revocation message missing data.")
-            await self.send_error_message(writer, "Revocation data missing.")
-            return
+        data = message.get("data", {})
+        revoked_server_id = data.get("server_id")
+        reason = data.get("reason", "No reason provided")
+        timestamp = data.get("timestamp", time.time())
 
-        if not (revoked_server_id := data.get("server_id")):
-            # Check for revoked server_id
+        if not revoked_server_id:
             logger.warning("Revocation message missing server_id.")
             await self.send_error_message(writer, "Revoked server_id missing.")
             return
 
-        reason = data.get("reason", "No reason provided")
-        timestamp = data.get("timestamp", time.time())
-
         logger.info(f"Received revocation for server_id {revoked_server_id} at {timestamp}: Reason={reason}")
+
+        # Verify the revocation message's signature
+        # Assuming revocations are only sent by trusted authority nodes
+        # Implement authority checks here
+
+        # Example: Check if the revocation is sent by a trusted authority
+        authority_ids = self.peer.get_authority_ids()  # Implement this method in Peer
+        sender_server_id = message.get("server_id")
+        if sender_server_id not in authority_ids:
+            logger.warning(f"Revocation message from unauthorized server_id {sender_server_id}. Ignoring.")
+            await self.send_error_message(writer, "Unauthorized to send revocation.")
+            return
 
         # Process the revocation
         # Remove the peer from active_peers and known_peers
@@ -934,6 +875,16 @@ class MessageHandler:
         # Broadcast the revocation to other peers
         await self.peer.broadcast_message(message)
         logger.info(f"Broadcasted revocation of {revoked_server_id} to other peers")
+
+    async def handle_default(self, message, reader, writer):
+        """
+        Handle unknown message types.
+        """
+        message_type = message.get("type", "unknown")
+        logger.warning(f"Received unknown message type: {message_type}")
+        await self.send_error_message(writer, f"Unknown message type: {message_type}")
+
+    # Additional Methods
 
     async def save_chunk(self, start_byte, end_byte, chunk, writer):
         """
@@ -980,6 +931,12 @@ class MessageHandler:
         logger.info(f"Sent signed error message to peer: {error_message}")
 
         if resend and start_byte is not None and chunk_size is not None:
+            key = (start_byte, chunk_size)
+            self.resend_attempts[key] = self.resend_attempts.get(key, 0) + 1
+            if self.resend_attempts[key] > self.max_resend_attempts:
+                logger.error(f"Max resend attempts reached for chunk starting at {start_byte}. Aborting resend.")
+                return
+
             resend_request = {
                 "type": "resend_chunk",
                 "data": {
@@ -1012,7 +969,7 @@ class MessageHandler:
                     "type": "heartbeat",
                     "data": {
                         "server_id": self.peer.server_id,
-                        "timestamp": time.time() + self.peer.crypto.ntp_offset,
+                        "timestamp": time.time() + self.peer.ntp_offset,
                         "uptime": self.peer.uptime  # Assuming Peer has an 'uptime' attribute
                     }
                 }
@@ -1025,53 +982,5 @@ class MessageHandler:
                     logger.debug(f"Sent signed heartbeat to {peer_id}")
                 except Exception as e:
                     logger.error(f"Failed to send heartbeat to {peer_id}: {e}")
-
-    async def request_utxo(self, writer):
-        """
-        Request UTXO data from a peer.
-
-        Args:
-            writer (StreamWriter): The StreamWriter object for the connection.
-        """
-        request_message = {
-            "type": "getutxo",
-            "data": {
-                "server_id": self.peer.server_id,
-                "timestamp": time.time() + self.peer.crypto.ntp_offset
-            }
-        }
-        # Serialize and sign the request message
-        serialized_request = self.serialize_message(request_message, include_signature=False)
-        signature = self.peer.crypto.sign(serialized_request)
-        request_message['signature'] = base64.b64encode(signature).decode('utf-8')
-
-        await self.send_message(writer, request_message)
-        logger.info("Sent signed UTXO data request to peer.")
-
-    # Additional methods to load and save heartbeat records
-    async def save_heartbeat_records(self):
-        """
-        Persist heartbeat records to disk.
-        """
-        try:
-            async with aiofiles.open('heartbeat_records.json', 'w') as f:
-                await f.write(json.dumps(self.peer.heartbeat_records, indent=4))
-            logger.info("Heartbeat records saved to disk.")
-        except Exception as e:
-            logger.error(f"Failed to save heartbeat records: {e}")
-
-    async def load_heartbeat_records(self):
-        """
-        Load heartbeat records from disk.
-        """
-        try:
-            async with aiofiles.open('heartbeat_records.json', 'r') as f:
-                data = await f.read()
-                self.peer.heartbeat_records = json.loads(data)
-            logger.info("Heartbeat records loaded from disk.")
-        except FileNotFoundError:
-            logger.warning("No existing heartbeat records found. Initialized empty records.")
-            self.peer.heartbeat_records = {}
-        except Exception as e:
-            logger.error(f"Failed to load heartbeat records: {e}")
-            self.peer.heartbeat_records = {}
+                    # Optionally, mark the peer as unresponsive
+                    self.peer.mark_peer_unresponsive(peer_id)  # Implement this method in Peer
