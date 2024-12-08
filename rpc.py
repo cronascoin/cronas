@@ -5,7 +5,7 @@ import json
 import logging
 import base64
 from datetime import datetime
-import os
+import time
 import sys
 
 from aiohttp import web
@@ -13,7 +13,6 @@ from aiohttp import web
 # Import the Peer and Crypto classes
 from peer import Peer
 from crypto import Crypto  # Ensure you have implemented the Crypto class
-from message import MessageHandler  # Ensure message.py is correctly implemented
 
 # Configure logging
 logging.basicConfig(
@@ -180,19 +179,19 @@ class RPCServer:
         try:
             peers_info = []
             current_time = time.time()
+            ping_time = 0.123  # Placeholder for actual ping time; implement as needed
+
             for peer_id, peer_data in self.peer.active_peers.items():
                 last_seen = peer_data.get('last_seen', current_time)
                 uptime_seconds = int(current_time - peer_data.get('connected_at', current_time))
-                ping_time = 0.123  # Placeholder for actual ping time; implement as needed
-
                 peer_info = {
                     "server_id": peer_id,
                     "addr": peer_id,
                     "addrlocal": f"{self.peer.host}:{self.rpc_port}",
                     "addrbind": f"0.0.0.0:{self.rpc_port}",
-                    "lastseen": datetime.utcfromtimestamp(last_seen).isoformat() + "Z",
+                    "lastseen": f"{datetime.utcfromtimestamp(last_seen).isoformat()}Z",
                     "uptime_seconds": uptime_seconds,
-                    "ping": ping_time
+                    "ping": ping_time,
                 }
                 peers_info.append(peer_info)
 
