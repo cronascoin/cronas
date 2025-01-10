@@ -5,3 +5,5 @@ ntplib
 netifaces
 requests
 jsonschema
+stun
+aiohttp
