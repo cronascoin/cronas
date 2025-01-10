@@ -361,9 +361,7 @@ class Peer:
                     await writer.wait_closed()
                     return
 
-                # Save the peer's public key if provided
-                public_key_pem = message.get("public_key")
-                if public_key_pem:
+                if public_key_pem := message.get("public_key"):
                     self.crypto.add_peer_public_key(peer_server_id, public_key_pem)
                 else:
                     logger.warning(f"No public key from peer {peer_server_id}.")
@@ -554,8 +552,7 @@ class Peer:
 
         # Disconnect if connected
         if server_id in self.active_peers:
-            peer_info = self.active_peers.pop(server_id, None)
-            if peer_info:
+            if peer_info := self.active_peers.pop(server_id, None):
                 writer = peer_info['writer']
                 if not writer.is_closing():
                     writer.close()
@@ -675,8 +672,7 @@ class Peer:
         """
         Forward a directed chat message to its intended peer if connected.
         """
-        peer_info = self.active_peers.get(to_sid)
-        if peer_info:
+        if peer_info := self.active_peers.get(to_sid):
             writer = peer_info['writer']
             try:
                 await self.message.send_message(writer, {
